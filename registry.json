@@ -1,5 +1,6 @@
 {
   "name": "zlyon 的 Songloft 插件源",
+  "includes": [],
   "plugins": [
     "https://raw.githubusercontent.com/zlyon/lx-hunter/main/plugin.json"
   ]
