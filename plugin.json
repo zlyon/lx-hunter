@@ -4,7 +4,7 @@
   "description": "GitHub 音源爬取、去重、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回；灌入返回洛雪 id、@name 同名去重、日志兜底确认、一键同步洛雪状态；onInit 同步返回防热重载死锁；镜像/直连/代理智能切换互斥；左侧导航 + 圆角卡片界面，配色跟随主程序深浅色主题",
   "author": "zlyon",
   "homepage": "https://github.com/zlyon/lx-hunter",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "entryPath": "lx-hunter",
   "icon": "icon.svg",
   "main": "main.js",
