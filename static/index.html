@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音源猎手</title>
+<style>
+  /* 主题跟随 Songloft：宿主注入 theme.css（--md-* 变量）+ common.js，这里只做令牌映射。
+     var() 兜底值仅用于脱离宿主单独预览。注意：类名避开宿主已占用的 .card / .section-title。 */
+  :root {
+    --bg: var(--md-surface, #fdfbff);
+    --side: var(--md-surface-container-low, #f7f2fa);
+    --panel: var(--md-surface-container-low, #f7f2fa);
+    --panel2: var(--md-surface-container-high, #ece6f0);
+    --border: var(--md-outline-variant, #c4c6cf);
+    --text: var(--md-on-surface, #1b1b1f);
+    --muted: var(--md-on-surface-variant, #47464f);
+    --accent: var(--md-primary, #415f91);
+    --on-accent: var(--md-on-primary, #ffffff);
+    --acc-container: var(--md-primary-container, #d6e3ff);
+    --acc-on-container: var(--md-on-primary-container, #001b3f);
+    --green: var(--md-success, #146c2e);
+    --red: var(--md-error, #ba1a1a);
+    --yellow: var(--md-warning, #7a5900);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+
+  /* ===== 布局：左侧导航 + 右侧内容 ===== */
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .side { width: 190px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 18px 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
+  .brand .logo { font-size: 26px; }
+  .brand b { display: block; font-size: 15px; line-height: 1.3; }
+  .brand i { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
+  .side nav { display: flex; flex-direction: column; gap: 4px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: transparent; color: var(--muted); border: none; border-radius: 12px; padding: 10px 14px; font-size: 14px; cursor: pointer; }
+  .nav-item .ico { font-size: 16px; width: 20px; text-align: center; }
+  .nav-item:hover { background: var(--panel2); color: var(--text); }
+  .nav-item.active { background: var(--acc-container); color: var(--acc-on-container); font-weight: 600; }
+  .side-foot { margin-top: auto; padding: 8px; color: var(--muted); font-size: 11px; }
+
+  .main { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .view { display: none; max-width: 1080px; margin: 0 auto; }
+  .view.active { display: block; }
+
+  /* ===== 圆角卡片板块 ===== */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 16px 18px; margin-bottom: 16px; }
+  .p-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .p-head .t { font-size: 15px; font-weight: 600; }
+  .p-head .badge { background: var(--acc-container); color: var(--acc-on-container); border-radius: 999px; padding: 1px 10px; font-size: 11px; font-weight: 500; }
+  .p-head .right { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+  /* 概览统计：热门搜索式胶囊网格 */
+  .pill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .stat { display: flex; align-items: center; gap: 10px; background: var(--panel2); border-radius: 12px; padding: 10px 14px; }
+  .stat .num { min-width: 34px; height: 34px; border-radius: 50%; background: var(--md-surface-container-highest, #e0e0e0); color: var(--text); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; padding: 0 6px; }
+  .stat span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+  .stat.usable .num { background: var(--md-success-container, #b6f2c2); color: var(--md-on-surface, #1b1b1f); }
+  .stat.imported .num { background: var(--acc-container); color: var(--acc-on-container); }
+
+  /* ===== 控件 ===== */
+  button { background: var(--accent); color: var(--on-accent); border: none; border-radius: 999px; padding: 8px 18px; font-size: 13px; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.danger { background: var(--red); color: var(--md-surface, #fff); }
+  button.ghost.danger { background: transparent; color: var(--red); border-color: var(--red); }
+  button.ok { background: var(--green); color: var(--md-surface, #fff); }
+  button.small { padding: 3px 12px; font-size: 12px; }
+  .btns { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  /* 搜索条：圆角输入 + 右侧下拉 */
+  .searchbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  input[type=text], input[type=number] { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 8px 16px; }
+  input[type=text]:focus, input[type=number]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  select { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 8px 12px; cursor: pointer; }
+  label.chk { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  input[type=number] { width: 90px; }
+
+  /* ===== 进度与日志 ===== */
+  .progress-wrap { background: var(--panel2); border-radius: 12px; padding: 12px 16px; margin-bottom: 12px; display: none; }
+  .progress-wrap.show { display: block; }
+  .progress-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin: 8px 0 2px; }
+  .progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width .3s; border-radius: 3px; }
+  #log { background: var(--md-surface-container-lowest, var(--bg)); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; height: 160px; overflow-y: auto; font: 12px/1.7 Consolas, monospace; margin-bottom: 12px; white-space: pre-wrap; }
+  #log .warn { color: var(--yellow); }
+  #log .error { color: var(--red); }
+  #log .ok { color: var(--green); }
+
+  /* ===== 表格 ===== */
+  .tbl-wrap { border: 1px solid var(--border); border-radius: 12px; overflow: auto; max-height: 420px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel2); position: sticky; top: 0; z-index: 1; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--panel2); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot.ok { background: var(--green); } .dot.dead { background: var(--red); } .dot.unknown { background: var(--muted); }
+  .tag { display: inline-block; background: var(--md-secondary-container, #e2e2f0); color: var(--md-on-secondary-container, #1b1b1f); border-radius: 999px; padding: 1px 8px; font-size: 11px; margin-left: 6px; }
+  .tag.usable { background: var(--md-success-container, #b6f2c2); color: var(--md-on-surface, #1b1b1f); }
+  .tag.imported { background: var(--acc-container); color: var(--acc-on-container); }
+
+  /* 红绿灯 */
+  .lights { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .light { display: inline-flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; font-size: 11px; color: var(--muted); }
+  .light i { width: 8px; height: 8px; border-radius: 50%; background: var(--md-surface-container-highest, #e0e0e0); display: inline-block; }
+  .light.up i { background: var(--green); box-shadow: 0 0 4px var(--green); }
+  .light.down i { background: var(--red); box-shadow: 0 0 4px var(--red); }
+  .light.up { color: var(--green); }
+  .light.down { color: var(--red); }
+
+  /* ===== 设置页 ===== */
+  .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form-row label { width: 130px; color: var(--muted); font-size: 13px; flex-shrink: 0; }
+  .form-row .hint { color: var(--muted); font-size: 12px; }
+  #mirrorTestResult.ok { color: var(--green); font-weight: 600; font-size: 13px; }
+  #mirrorTestResult.fail { color: var(--red); font-weight: 600; font-size: 13px; }
+  .repo-list { list-style: none; margin-bottom: 8px; }
+  .repo-list li { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--panel2); border-radius: 10px; margin-bottom: 6px; font-size: 13px; }
+  .repo-list li.grow-empty { border: 1px dashed var(--border); background: transparent; color: var(--muted); }
+  .repo-list li .grow { flex: 1; }
+  .repo-fold { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; background: var(--panel2); border: none; border-radius: 10px; color: var(--fg); font-size: 13px; cursor: pointer; text-align: left; margin-bottom: 6px; }
+  .repo-fold:hover { filter: brightness(1.08); }
+  .repo-fold .arrow { display: inline-block; transition: transform .15s ease; }
+  .repo-fold.open .arrow { transform: rotate(90deg); }
+  .repo-fold .cnt { color: var(--muted); font-size: 12px; }
+  #builtinRepos { margin-top: 2px; }
+  #builtinRepos.collapsed { display: none; }
+  .lock { font-size: 12px; color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  .empty { text-align: center; color: var(--muted); padding: 36px; }
+
+  /* ===== 移动端自适应（参考洛雪：侧边栏收起为抽屉 + 顶栏汉堡按钮）===== */
+  .topbar { display: none; }
+  .backdrop { display: none; }
+  @media (max-width: 760px) {
+    .main { padding: 12px 12px 24px; }
+    .topbar { display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px; }
+    .topbar .menu-btn { background: transparent; color: var(--text); border: none; font-size: 22px; line-height: 1; padding: 6px 12px; cursor: pointer; border-radius: 10px; }
+    .topbar .menu-btn:hover { filter: none; background: var(--panel2); }
+    .topbar .tb-title { font-size: 16px; font-weight: 600; }
+    .side { position: fixed; top: 0; left: 0; bottom: 0; z-index: 100; width: 250px; max-width: 80vw;
+            transform: translateX(-105%); transition: transform .22s ease; border-right: none; }
+    .side.open { transform: translateX(0); box-shadow: 0 0 28px rgba(0,0,0,.35); }
+    .backdrop { display: none; position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.45); border: none; border-radius: 0; padding: 0; cursor: default; }
+    .backdrop.show { display: block; }
+    .pill-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+    .form-row label { width: auto; }
+    .form-row .hint { width: 100%; }
+    input[type=text] { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== 左侧导航 ===== -->
+  <aside class="side">
+    <div class="brand">
+      <span class="logo">🎧</span>
+      <div><b>音源猎手</b><i>爬取 · 检测 · 灌入</i></div>
+    </div>
+    <nav>
+      <button class="nav-item active" data-view="library"><span class="ico">📂</span>源库</button>
+      <button class="nav-item" data-view="import"><span class="ico">📥</span>灌入</button>
+      <button class="nav-item" data-view="settings"><span class="ico">⚙️</span>设置</button>
+    </nav>
+    <div class="side-foot">v1.4.17</div>
+  </aside>
+
+  <!-- ===== 内容区 ===== -->
+  <main class="main">
+
+    <!-- 移动端顶栏：汉堡按钮唤出侧边抽屉 -->
+    <div class="topbar">
+      <button id="btnMenu" class="menu-btn" type="button" aria-label="打开菜单">☰</button>
+      <span class="tb-title">音源猎手</span>
+    </div>
+
+    <!-- ============ 源库 ============ -->
+    <section class="view active" id="pane-library">
+      <div class="panel">
+        <div class="p-head"><span>📊</span><span class="t">收录概览</span><span class="badge" id="statBadge">统计</span></div>
+        <div class="pill-grid">
+          <div class="stat"><span class="num" id="stTotal">—</span><span>收录链接</span></div>
+          <div class="stat"><span class="num" id="stOk">—</span><span>可访问</span></div>
+          <div class="stat"><span class="num" id="stSus">—</span><span>音源</span></div>
+          <div class="stat usable"><span class="num" id="stUsable">—</span><span>实测可用</span></div>
+          <div class="stat imported"><span class="num" id="stImported">—</span><span>已灌入洛雪</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span>🚀</span><span class="t">任务</span><span class="right">爬取 / 检测在后台执行，可切换页面</span></div>
+        <div class="btns" style="margin-bottom:12px">
+          <button id="btnCrawl">开始爬取</button>
+          <button id="btnCheck" class="ghost">可用性检测</button>
+          <button id="btnExport" class="ghost">导出 JSON</button>
+        </div>
+        <div class="progress-wrap" id="progWrap">
+          <div style="display:flex;justify-content:space-between">
+            <span id="progLabel">任务进行中…</span>
+            <span class="muted" id="progDetail"></span>
+          </div>
+          <div class="progress-bar"><div id="progBar"></div></div>
+        </div>
+        <div id="log"></div>
+        <div style="display:flex;justify-content:flex-end">
+          <label class="chk"><input type="checkbox" id="chkAutoScroll" checked> 自动滚动到最新日志</label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span>🎵</span><span class="t">音源列表</span></div>
+        <div class="searchbar">
+          <input type="text" id="q" placeholder="搜索名称 / 仓库…" style="width:220px">
+          <select id="filter">
+            <option value="all">全部</option>
+            <option value="usable">仅可用</option>
+            <option value="suspected">仅音源</option>
+            <option value="ok">仅可访问</option>
+            <option value="dead">仅失效</option>
+          </select>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:120px">状态</th>
+                <th>名称</th>
+                <th style="width:180px">仓库</th>
+                <th style="width:210px">可用平台</th>
+                <th style="width:70px">大小</th>
+                <th style="width:56px">链接</th>
+              </tr>
+            </thead>
+            <tbody id="rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 灌入 ============ -->
+    <section class="view" id="pane-import">
+      <div class="panel">
+        <div class="p-head"><span>📥</span><span class="t">灌入洛雪</span><span class="badge" id="importBadge">0</span>
+          <span class="right">🟢 平台可用 · 🔴 不可用 · 仅实测可用可灌入</span>
+        </div>
+        <div class="btns" style="margin-bottom:12px">
+          <button id="btnDoImport" class="ok">灌入所选</button>
+          <button id="btnRevoke" class="ghost danger">撤回所选</button>
+          <button id="btnRevokeAll" class="ghost">全部撤回</button>
+          <button id="btnSyncLx" class="ghost">同步洛雪ID</button>
+          <button id="btnRefreshImport" class="ghost">刷新</button>
+        </div>
+        <div id="importMsg" class="muted" style="margin-bottom:10px"></div>
+        <label class="muted" style="display:inline-flex;align-items:center;gap:6px;margin-bottom:8px;font-size:12px">
+          <input type="checkbox" id="chkShowDup"> 显示同内容重复项（默认每组只保留一个）
+        </label>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="chkAllImport"></th>
+                <th>名称</th>
+                <th style="width:250px">平台状态</th>
+                <th style="width:110px">灌入状态</th>
+                <th style="width:150px">灌入时间</th>
+              </tr>
+            </thead>
+            <tbody id="importRows"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span>↩️</span><span class="t">已灌入（可撤回）</span><span class="right">撤回会从洛雪音源插件中删除对应音源</span></div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="chkAllRevoke"></th>
+                <th>名称</th>
+                <th style="width:250px">平台状态</th>
+                <th style="width:160px">洛雪 id</th>
+                <th style="width:150px">灌入时间</th>
+              </tr>
+            </thead>
+            <tbody id="revokeRows"><tr><td colspan="5" class="empty">暂无灌入记录</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 设置 ============ -->
+    <section class="view" id="pane-settings">
+      <div class="panel">
+        <div class="p-head"><span>🌐</span><span class="t">网络</span></div>
+        <div class="form-row">
+          <label>爬取代理</label>
+          <input type="text" id="cfgProxy" placeholder="http://127.0.0.1:7897" style="width:260px">
+          <span class="hint">仅用于 GitHub 爬取（仓库扫描 / 脚本下载），不影响播放与灌入</span>
+        </div>
+        <div class="form-row">
+          <label>raw 加速镜像</label>
+          <select id="cfgMirrorSel" style="width:260px"></select>
+          <button id="btnTestMirror" class="ghost" type="button">测试</button>
+        </div>
+        <div class="form-row" id="rowMirrorCustom" style="display:none">
+          <label>自定义镜像</label>
+          <input type="text" id="cfgMirror" placeholder="https://your-mirror.example.com" style="width:260px">
+        </div>
+        <div class="form-row" id="rowMirrorTest" style="display:none">
+          <label>测试结果</label>
+          <span class="hint" id="mirrorTestResult"></span>
+        </div>
+        <div class="form-row">
+          <span class="hint" style="width:auto">镜像会真实拉取 GitHub 文件验证（识别假 200），并在 路径式/前缀式 两种拼接间自动回退；不使用镜像时走 jsDelivr → 直连 → 代理</span>
+        </div>
+        <div class="form-row">
+          <label>强制代理</label>
+          <label class="chk"><input type="checkbox" id="cfgForceProxy"> 最优先走代理爬取</label>
+          <span class="hint">勾选：代理 → 镜像 → 直连；不勾选（默认）：镜像 → 直连 → 代理。与镜像不互斥，仅调整优先级</span>
+        </div>
+        <div class="form-row">
+          <label>GitHub Token</label>
+          <input type="text" id="cfgGhToken" placeholder="ghp_… / github_pat_…" style="width:280px">
+          <span class="hint" id="ghTokenState"></span>
+        </div>
+        <div class="form-row">
+          <span class="hint" style="width:auto">GitHub API 未认证限额仅 60 次/小时，配额耗尽会爬取全部失败。<a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener">点此直达 GitHub Token 创建页 ↗</a>（登录 GitHub 即可，名称随意、有效期选长一点、权限一项都不用勾，点 Generate token 后复制生成的 token 粘贴到上面），限额提升到 5000 次/小时；留空则保持不变</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span>🔍</span><span class="t">检测</span></div>
+        <div class="form-row">
+          <label>沙箱可用性检测</label>
+          <label class="chk"><input type="checkbox" id="cfgDeep"> 爬取后自动执行 jsenv 可用性检测</label>
+        </div>
+        <div class="form-row">
+          <label>每批数量</label>
+          <label class="chk"><input type="number" id="cfgMaxDeep" min="1" max="500"> 个</label>
+          <span class="hint">每测完一批自动继续下一批，直到全部测完；此数值仅为分批展示粒度</span>
+        </div>
+        <div class="btns"><button id="btnSaveCfg">保存设置</button></div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span>📦</span><span class="t">仓库管理</span><span class="right">内置仓库由插件维护；下方可添加 / 删除自定义仓库</span></div>
+        <button type="button" class="repo-fold" id="btnFoldBuiltin"><span class="arrow">▶</span><span class="t">内置仓库</span><span class="cnt" id="builtinCnt"></span></button>
+        <ul class="repo-list collapsed" id="builtinRepos"></ul>
+        <ul class="repo-list" id="customRepos"></ul>
+        <div class="form-row">
+          <input type="text" id="inpRepo" placeholder="owner/repo 或 GitHub 仓库地址" style="width:300px">
+          <button id="btnAddRepo" class="ok">＋ 添加</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 移动端抽屉遮罩 -->
+<div id="drawerBackdrop" class="backdrop"></div>
+
+<!-- 静态资源必须走 static/ 子路径（宿主公开路由 /api/v1/jsplugin/<id>/static/*，免鉴权）；
+     写成 app.js 会被解析到插件根路由 → 要求 JWT → 401 -->
+<script src="static/app.js?v=1.4.17"></script>
+</body>
+</html>
