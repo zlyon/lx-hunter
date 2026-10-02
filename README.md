@@ -2,7 +2,7 @@
 
 Songloft (洛雪音乐宿主) JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回。
 
-![版本](https://img.shields.io/badge/version-1.4.17-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
+![版本](https://img.shields.io/badge/version-1.4.18-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
 ![音源猎手界面](docs/screenshot-source-library.png)
 

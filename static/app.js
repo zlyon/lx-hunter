@@ -366,15 +366,21 @@ function refreshImportTab() {
       }
     }
 
+    // 上面板只显示未灌入：族内任一条已灌入即整族隐藏（与灌入时同名保护口径一致）
+    function famInLx(e) {
+      var famAll = e._famAll || [e]
+      for (var m = 0; m < famAll.length; m++) if (importedMap[famAll[m].id]) return true
+      return false
+    }
+    var pending = []
+    for (var f2 = 0; f2 < visible.length; f2++) if (!famInLx(visible[f2])) pending.push(visible[f2])
+
     if (!usable.length) {
-      $('importRows').innerHTML = '<tr><td colspan="5" class="empty">暂无实测可用的音源 — 先在「源库」执行 爬取 + 可用性检测</td></tr>'
+      $('importRows').innerHTML = '<tr><td colspan="3" class="empty">暂无实测可用的音源 — 先在「源库」执行 爬取 + 可用性检测</td></tr>'
+    } else if (!pending.length) {
+      $('importRows').innerHTML = '<tr><td colspan="3" class="empty">所有实测可用音源均已灌入 ✓ 可在下方面板撤回后重新灌入</td></tr>'
     } else {
-      $('importRows').innerHTML = visible.map(function (e) {
-        // 族内任一条已灌入即视为已灌入
-        var inLx = false
-        var famAll = e._famAll || [e]
-        for (var m = 0; m < famAll.length; m++) if (importedMap[famAll[m].id]) { inLx = true; break }
-        var imp = inLx ? '<span class="tag imported">已灌入</span>' : '<span class="muted">未灌入</span>'
+      $('importRows').innerHTML = pending.map(function (e) {
         var tags = ''
         if (e._dupN > 1) tags += e._isBest
           ? '<span class="tag" title="有 ' + (e._dupN - 1) + ' 个内容完全相同的音源，灌入时自动跳过其余">同内容 ×' + e._dupN + '（保留此条）</span>'
@@ -390,8 +396,6 @@ function refreshImportTab() {
           '<td><input type="checkbox" data-entry="' + esc(e.id) + '"></td>' +
           '<td title="' + tip + '">' + esc(e.scriptName || e.name) + tags + '</td>' +
           '<td>' + lightsHtml(e.deep && e.deep.platforms) + '</td>' +
-          '<td>' + imp + '</td>' +
-          '<td class="muted">—</td>' +
           '</tr>'
       }).join('')
     }
@@ -413,8 +417,10 @@ function refreshImportTab() {
           '</tr>'
       }).join('')
     }
-    $('importMsg').textContent = '实测可用 ' + usable.length + ' 个 · 独立音源 ' + fams.length + ' 个 · 已灌入 ' + importedRows.length + ' 个' +
+    $('importMsg').textContent = '实测可用 ' + usable.length + ' 个 · 独立音源 ' + fams.length + ' 个 · 未灌入 ' + pending.length + ' 个 · 已灌入 ' + importedRows.length + ' 个' +
       (dupHidden ? ' · 已折叠同内容/旧版本 ' + dupHidden + ' 个（勾选上方开关可查看）' : '')
+    var bImp = $('importBadge'); if (bImp) bImp.textContent = String(pending.length)
+    var bRev = $('revokeBadge'); if (bRev) bRev.textContent = String(importedRows.length)
     // 旧记录缺洛雪 id：本次会话自动静默同步一次
     if (!autoSynced && importedRows.length && importedRows.some(function (r) { return !r.lxId })) {
       autoSynced = true
@@ -456,7 +462,7 @@ onClick('btnRevokeAll', function () {
 /* 灌入/撤回进行中：禁用全部操作按钮；灌入每秒轮询进度 */
 var importTimer = null
 function setImportBtns(on) {
-  var ids = ['btnDoImport', 'btnRevoke', 'btnRevokeAll', 'btnRefreshImport']
+  var ids = ['btnDoImport', 'btnRevoke', 'btnRevokeAll', 'btnRefreshImport', 'btnRefreshRevoke']
   for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = !on
 }
 function watchImport() {
@@ -495,6 +501,7 @@ function doRevoke(body) {
     .catch(function (e) { setImportBtns(true); throw e })
 }
 $('btnRefreshImport').onclick = guard(function () { return refreshImportTab() })
+$('btnRefreshRevoke').onclick = guard(function () { return refreshImportTab() })
 
 /* 同步洛雪ID：拉取洛雪音源列表，为旧记录补全 id、标记已不存在的音源 */
 function syncLx(silent) {

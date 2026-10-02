@@ -168,7 +168,7 @@
       <button class="nav-item" data-view="import"><span class="ico">📥</span>灌入</button>
       <button class="nav-item" data-view="settings"><span class="ico">⚙️</span>设置</button>
     </nav>
-    <div class="side-foot">v1.4.17</div>
+    <div class="side-foot">v1.4.18</div>
   </aside>
 
   <!-- ===== 内容区 ===== -->
@@ -247,12 +247,10 @@
     <section class="view" id="pane-import">
       <div class="panel">
         <div class="p-head"><span>📥</span><span class="t">灌入洛雪</span><span class="badge" id="importBadge">0</span>
-          <span class="right">🟢 平台可用 · 🔴 不可用 · 仅实测可用可灌入</span>
+          <span class="right">🟢 平台可用 · 🔴 不可用 · 仅显示未灌入，灌入成功后移至下方</span>
         </div>
         <div class="btns" style="margin-bottom:12px">
           <button id="btnDoImport" class="ok">灌入所选</button>
-          <button id="btnRevoke" class="ghost danger">撤回所选</button>
-          <button id="btnRevokeAll" class="ghost">全部撤回</button>
           <button id="btnSyncLx" class="ghost">同步洛雪ID</button>
           <button id="btnRefreshImport" class="ghost">刷新</button>
         </div>
@@ -267,17 +265,22 @@
                 <th style="width:36px"><input type="checkbox" id="chkAllImport"></th>
                 <th>名称</th>
                 <th style="width:250px">平台状态</th>
-                <th style="width:110px">灌入状态</th>
-                <th style="width:150px">灌入时间</th>
               </tr>
             </thead>
-            <tbody id="importRows"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+            <tbody id="importRows"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
           </table>
         </div>
       </div>
 
       <div class="panel">
-        <div class="p-head"><span>↩️</span><span class="t">已灌入（可撤回）</span><span class="right">撤回会从洛雪音源插件中删除对应音源</span></div>
+        <div class="p-head"><span>↩️</span><span class="t">已灌入（可撤回）</span><span class="badge" id="revokeBadge">0</span>
+          <span class="right">撤回会从洛雪音源插件中删除对应音源</span>
+        </div>
+        <div class="btns" style="margin-bottom:12px">
+          <button id="btnRevoke" class="ghost danger">撤回所选</button>
+          <button id="btnRevokeAll" class="ghost">全部撤回</button>
+          <button id="btnRefreshRevoke" class="ghost">刷新</button>
+        </div>
         <div class="tbl-wrap">
           <table>
             <thead>
@@ -369,6 +372,6 @@
 
 <!-- 静态资源必须走 static/ 子路径（宿主公开路由 /api/v1/jsplugin/<id>/static/*，免鉴权）；
      写成 app.js 会被解析到插件根路由 → 要求 JWT → 401 -->
-<script src="static/app.js?v=1.4.17"></script>
+<script src="static/app.js?v=1.4.18"></script>
 </body>
 </html>
