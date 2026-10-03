@@ -14,7 +14,7 @@
     "jsenv"
   ],
   "updateUrl": "https://raw.githubusercontent.com/zlyon/lx-hunter/main/plugin.json",
-  "download_url": "https://github.com/zlyon/lx-hunter/releases/download/v1.4.18/lx-hunter-v1.4.18.jsplugin.zip",
+  "download_url": "https://github.com/zlyon/lx-hunter/releases/download/v1.4.19/lx-hunter-v1.4.19.jsplugin.zip",
   "entryHash": "de94446e0df6e8a4f613aa883867b2f6e483315b53f3d9a5ab25b71ef613a44b",
   "zipHash": "b71db1d17132d43adcbb28e3fc4d84e949949229404851b2cec3e4cdbde5092e"
 }
