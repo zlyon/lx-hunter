@@ -459,32 +459,65 @@ onClick('btnRevokeAll', function () {
   return doRevoke({ all: true })
 })
 
-/* 灌入/撤回进行中：禁用全部操作按钮；灌入每秒轮询进度 */
+/* 灌入/撤回进行中：禁用常规操作按钮，改为显示「取消灌入」；灌入每秒轮询进度 */
 var importTimer = null
+var importPollFails = 0            // 连续轮询失败次数
+var IMPORT_POLL_MAX_FAIL = 5       // 连续失败达此值即解锁，避免链路抖动把界面永久锁死
 function setImportBtns(on) {
-  var ids = ['btnDoImport', 'btnRevoke', 'btnRevokeAll', 'btnRefreshImport', 'btnRefreshRevoke']
-  for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = !on
+  var ids = ['btnDoImport', 'btnSyncLx', 'btnRevoke', 'btnRevokeAll', 'btnRefreshImport', 'btnRefreshRevoke']
+  for (var i = 0; i < ids.length; i++) { var el = $(ids[i]); if (el) el.disabled = !on }
+}
+function setCancelBtn(show) {
+  var b = $('btnCancelImport')
+  if (!b) return
+  b.style.display = show ? '' : 'none'
+  if (show) b.disabled = false
+}
+function stopImportWatch() { if (importTimer) { clearInterval(importTimer); importTimer = null } }
+/* 解锁界面：停止轮询、恢复按钮、隐藏取消、复位失败计数 */
+function releaseImportUI() {
+  stopImportWatch()
+  importPollFails = 0
+  setImportBtns(true)
+  setCancelBtn(false)
 }
 function watchImport() {
   setImportBtns(false)
+  setCancelBtn(true)
   if (importTimer) return
+  importPollFails = 0
   importTimer = setInterval(function () {
     api('/import-status').then(function (st) {
+      importPollFails = 0
       if (st.running) {
-        $('importMsg').textContent = '⏳ 灌入中 ' + (st.done || 0) + '/' + (st.total || 0) + (st.current ? '：' + st.current : '（正在下载脚本…）')
+        $('importMsg').textContent = st.cancelRequested
+          ? '⏹ 取消中 ' + (st.done || 0) + '/' + (st.total || 0) + (st.current ? '：' + st.current : '') + '…处理完当前音源即停止'
+          : '⏳ 灌入中 ' + (st.done || 0) + '/' + (st.total || 0) + (st.current ? '：' + st.current : '（正在下载脚本…）')
+        return
+      }
+      releaseImportUI()
+      var rs = st.results || []
+      var ok = rs.filter(function (r) { return r.status === 'success' }).length
+      var skip = rs.filter(function (r) { return r.status === 'skipped' }).length
+      var fail = rs.filter(function (r) { return r.status === 'failed' }).length
+      if (st.cancelRequested) {
+        // 取消没有弹窗，结论写在提示行里；refreshImportTab 会覆盖提示，故在其之后再写
+        var cancelMsg = '已取消灌入 · 成功 ' + ok + ' · 跳过 ' + skip + ' · 失败 ' + fail
+        refreshImportTab().then(function () { $('importMsg').textContent = cancelMsg })
       } else {
-        clearInterval(importTimer)
-        importTimer = null
-        setImportBtns(true)
-        var rs = st.results || []
-        var ok = rs.filter(function (r) { return r.status === 'success' }).length
-        var skip = rs.filter(function (r) { return r.status === 'skipped' }).length
-        var fail = rs.filter(function (r) { return r.status === 'failed' }).length
         alert('灌入完成：成功 ' + ok + ' 个' + (skip ? '，跳过 ' + skip + ' 个（内容重复 / 同名保护，见日志）' : '') + (fail ? '，失败 ' + fail + ' 个（见日志）' : ''))
         refreshImportTab()
-        refreshStats()
       }
-    }).catch(function () {})
+      refreshStats()
+    }).catch(function () {
+      // 外网中继 / 网络抖动会让进度查询失败：绝不能因此把界面永久锁死
+      importPollFails++
+      if (importPollFails >= IMPORT_POLL_MAX_FAIL) {
+        releaseImportUI()
+        $('importMsg').textContent = '⚠ 连续 ' + importPollFails + ' 次无法获取灌入进度（网络或中继不稳定），已解除锁定。' +
+          '后台灌入可能仍在继续，稍后可点「刷新」查看结果；若需中止请重进页面后再点「取消灌入」。'
+      }
+    })
   }, 1000)
 }
 
@@ -502,6 +535,18 @@ function doRevoke(body) {
 }
 $('btnRefreshImport').onclick = guard(function () { return refreshImportTab() })
 $('btnRefreshRevoke').onclick = guard(function () { return refreshImportTab() })
+
+/* 取消灌入：请求后端停止，继续保持轮询直到 running=false；后端已结束(409)则直接解锁 */
+onClick('btnCancelImport', function () {
+  var b = $('btnCancelImport')
+  if (b) b.disabled = true
+  $('importMsg').textContent = '正在取消灌入…（处理完当前音源即停止）'
+  return api('/import-cancel', { method: 'POST' }).catch(function () {
+    releaseImportUI()
+    $('importMsg').textContent = '灌入已结束，无需取消'
+    return refreshImportTab()
+  })
+})
 
 /* 同步洛雪ID：拉取洛雪音源列表，为旧记录补全 id、标记已不存在的音源 */
 function syncLx(silent) {
@@ -561,8 +606,10 @@ function refreshSettings() {
     refreshMirrorSelect(c.ghMirror || '')
     $('rowMirrorTest').style.display = 'none'
     $('cfgForceProxy').checked = !!c.forceProxy
+    $('cfgUseJsdelivr').checked = !!c.useJsdelivr
     $('cfgDeep').checked = !!c.deepCheck
     $('cfgMaxDeep').value = c.maxDeepCheck || 60
+    $('cfgDebug').checked = !!c.debugMode
     $('ghTokenState').textContent = c.ghTokenSet ? '已配置 ✓' : '未配置（未认证限额 60 次/小时）'
     renderRepos(c.customRepos || [])
   })
@@ -605,8 +652,10 @@ onClick('btnSaveCfg', function () {
     proxy: $val('cfgProxy', ''),
     ghMirror: currentMirror(),
     forceProxy: $chk('cfgForceProxy'),
+    useJsdelivr: $chk('cfgUseJsdelivr'),
     deepCheck: $chk('cfgDeep'),
-    maxDeepCheck: parseInt($val('cfgMaxDeep', '60'), 10) || 60
+    maxDeepCheck: parseInt($val('cfgMaxDeep', '60'), 10) || 60,
+    debugMode: $chk('cfgDebug')
   }
   var tk = $val('cfgGhToken', '').trim()
   if (tk) body.ghToken = tk // 留空 = 保持原 Token 不变
@@ -659,8 +708,14 @@ onClick('btnTestMirror', function () {
         var x = r.results[i]
         if (x.ok && (!best || x.latencyMs < best.latencyMs)) best = x
       }
-      if (best) { res.className = 'hint ok'; res.textContent = '可用 · ' + best.latencyMs + 'ms' }
-      else { res.className = 'hint fail'; res.textContent = '不可用' }
+      if (best) {
+        res.className = 'hint ok'
+        res.textContent = '可用 · ' + best.latencyMs + 'ms · ' + Math.max(1, Math.round(best.bytes / 1024)) + 'KB'
+      } else {
+        var why = (r.results[0] && r.results[0].error) || '连接失败'
+        res.className = 'hint fail'
+        res.textContent = '不可用（' + why + '）'
+      }
     })
     .finally(function () { btn.disabled = false; btn.textContent = old })
 })
@@ -671,7 +726,7 @@ bindEl('inpRepo', 'onkeydown', function (e) { if (e.key === 'Enter') $('btnAddRe
 refreshStats().then(refreshSources).catch(function (e) {
   $('rows').innerHTML = '<tr><td colspan="6" class="empty">加载失败: ' + esc(e.message) + '</td></tr>'
 })
-/* 页面在灌入中途刷新过：恢复按钮禁用与进度监听 */
-api('/import-status').then(function (st) { if (st.running) watchImport() }).catch(function () {})
+/* 页面在灌入中途刷新过：恢复进度监听；查不到状态也不能锁死界面 */
+api('/import-status').then(function (st) { if (st.running) watchImport(); else releaseImportUI() }).catch(function () { releaseImportUI() })
 setInterval(pollJob, 1500)
 pollJob()

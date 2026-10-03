@@ -2,7 +2,7 @@
 
 Songloft JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回。需要先安装洛雪音乐插件。
 
-![版本](https://img.shields.io/badge/version-1.4.19-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
+![版本](https://img.shields.io/badge/version-1.4.20-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
 ![音源猎手界面](docs/screenshot-source-library.png)
 
@@ -20,7 +20,7 @@ Songloft JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入�
 - 一键撤回：调用洛雪插件的删除接口，移除本插件灌入的音源（失效后清理用）
 
 **设置**
-- 爬取代理 / raw 加速镜像（内置 jsDelivr 自动兜底）/ 深度检测开关与单轮上限
+- 爬取代理 / raw 加速镜像（可选 jsDelivr 加速）/ 深度检测开关与单轮上限
 - 仓库管理：内置仓库锁定，自定义仓库支持直接粘贴 GitHub 地址
 
 ## 安装

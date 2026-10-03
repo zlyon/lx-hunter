@@ -148,7 +148,7 @@ var BOOTSTRAP = [
   '    try {',
   '      var result = handler(data);',
   '      if (result && typeof result.then === "function") {',
-  '        var t = setTimeout(function() { sendError(new Error("dispatch timeout")); }, 18000);',
+  '        var t = setTimeout(function() { sendError(new Error("dispatch timeout")); }, 5000);',
   '        result.then(function(v) { clearTimeout(t); sendResult(v); }, function(e) { clearTimeout(t); sendError(e); });',
   '      } else sendResult(result);',
   '    } catch (err) { sendError(err); }',
@@ -163,17 +163,23 @@ var BOOTSTRAP = [
 var config = null
 var db = { sources: {}, lastCrawl: 0 }
 var imported = {} // entryId -> { lxId, name, importedAt }
-var job = { running: false, type: '', cancelRequested: false, progress: {} }
+var job = { running: false, type: '', cancelRequested: false, progress: {}, step: '', stepAt: 0, line: '' }
 var logBuf = []
 var logSeq = 0
 
 function log(msg, module, level) {
   logSeq++
   logBuf.push({ seq: logSeq, ts: Date.now(), level: level || 'info', module: module || '系统', msg: String(msg) })
-  if (logBuf.length > 800) logBuf.shift()
+  // 调试模式下调高上限：否则逐条/逐线路的明细会把出问题前的那几行挤掉，反而更难查
+  if (logBuf.length > (debugOn() ? 2000 : 800)) logBuf.shift()
   var fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'
   try { songloft.log[fn]('[' + (module || '系统') + '] ' + msg) } catch (e) {}
 }
+
+// 调试模式（设置页开关，默认关闭）：只在排查任务异常时开启，输出逐条 / 逐线路细节。
+// 默认关闭时这些调用完全不产生日志，对普通用户零影响。
+function debugOn() { return !!(config && config.debugMode) }
+function dlog(msg, module) { if (debugOn()) log(msg, module || '调试') }
 
 function saveDbSoon() { // 简单去抖由调用方控制，这里直接存
   return songloft.storage.set(DB_KEY, JSON.stringify(db))
@@ -225,7 +231,7 @@ function fetchWithTimeout(url, options, timeoutMs) {
   // 会被宿主当作插件异常导致 VM 重载（onDeinit → 任务静默停止）。
   var timerId
   var timer = new Promise(function (_, rej) {
-    timerId = setTimeout(function () { rej(new Error('请求超时 ' + url.slice(0, 80))) }, timeoutMs || 15000)
+    timerId = setTimeout(function () { rej(new Error('请求超时 ' + url.slice(0, 80))) }, timeoutMs || 5000)
   })
   timer.catch(function () {}) // 吸收败者 rejection
   return Promise.race([
@@ -247,38 +253,112 @@ function withTimeout(p, ms, label) {
   return Promise.race([Promise.resolve(p), timer])
 }
 
-// 仅用于 GitHub 爬取链路（树 API / 脚本下载）。
-// 音频链接校验（verifyUrl）和洛雪网关调用不走这里。
-// 镜像与代理互斥（绝不同时用于同一请求），候选顺序：
-//   常规：加速镜像 → jsDelivr → 直连 → 代理直连（最后兜底）
-//   强制代理（config.forceProxy）：代理 → 加速镜像 → jsDelivr → 直连
+// 读响应体也必须带超时：部分站点会先返回响应头再挂住 body，
+// 此时 fetchWithTimeout 已经交卷，res.text() / res.arrayBuffer() 会永久等待
+// （真机表现就是任务长时间零进展，随后被宿主中断）。
+function readBody(res, as, timeoutMs, label) {
+  var p
+  try { p = res[as]() } catch (e) { return Promise.reject(e) }
+  return withTimeout(p, timeoutMs || 5000, label || '读取响应体')
+}
+
+// 把宿主/运行时的生硬错误翻译成人话。
+// 特别地：interrupted 来自宿主中断插件执行（插件被重载 / 宿主重启 / 步骤长时间无响应被强制中断），
+// 不是抓取逻辑自己的报错，直接抛给用户看没人能懂。
+function humanErr(e) {
+  var raw = String((e && e.message) || e || '未知错误')
+  if (/interrupt/i.test(raw)) {
+    return '宿主中断了本次执行（常见于插件被重载 / 宿主重启 / 步骤长时间无响应被强制中断）。' +
+      '已完成的结果已保存，可直接重新点击继续（原始错误: ' + raw + '）'
+  }
+  if (/超时|timeout/i.test(raw)) {
+    return raw + '（目标长时间无响应：可稍后重试，或在设置里换一个加速镜像）'
+  }
+  return raw
+}
+
+// 统一兜底：从定时器 / 游离 Promise 逃逸的异常会被宿主判定为「插件异常」并重载 VM
+// （真机表现就是任务被 interrupted），所以这里一律吸收并记日志，绝不让它逃出去。
+function safeAsync(label, fn) {
+  return function () {
+    try {
+      var r = fn.apply(null, arguments)
+      if (r && typeof r.then === 'function') {
+        r.then(null, function (e) { log('后台异常已拦截(' + label + '): ' + humanErr(e), '系统', 'error') })
+      }
+      return r
+    } catch (e) {
+      log('后台异常已拦截(' + label + '): ' + humanErr(e), '系统', 'error')
+    }
+  }
+}
+
+// 若运行时提供全局未处理 rejection 钩子则挂上，多一层网；不支持则静默跳过。
+try {
+  if (typeof globalThis.addEventListener === 'function') {
+    globalThis.addEventListener('unhandledrejection', function (ev) {
+      var r = ev && (ev.reason || (ev.detail && ev.detail.reason))
+      log('未处理的 Promise 拒绝已拦截: ' + humanErr(r), '系统', 'error')
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
+    })
+  }
+} catch (e) {}
+
+// ==================== 镜像预设 ====================
+// 拼接方式与站点强绑定：选定一个镜像站，它的写法就是固定的，不再逐个试两种。
+//   prefix → mbase + '/' + 完整原始 URL（前缀式，主流）
+//   path   → mbase + '/' + owner/repo/ref/path（路径式）
+// 2026-10 实测这五个站全部只接受「前缀式」：路径式分别返回 403 / 400。
+var MIRROR_STYLE = {
+  'https://proxy.vvvv.ee': 'prefix',
+  'https://ghproxy.net': 'prefix',
+  'https://gh-proxy.com': 'prefix',
+  'https://ghfast.top': 'prefix',
+  'https://gh1.lhl.one': 'prefix'
+}
+var MIRROR_PRESETS = [
+  'https://proxy.vvvv.ee',
+  'https://ghproxy.net',
+  'https://gh-proxy.com',
+  'https://ghfast.top',
+  'https://gh1.lhl.one'
+]
+// 自定义镜像无法预知流派，按主流的前缀式处理
+function mirrorUrlFor(mbase, rawUrl, rest) {
+  var base = String(mbase || '').trim().replace(/\/+$/, '')
+  if (!base) return null
+  return (MIRROR_STYLE[base] === 'path') ? (base + '/' + rest) : (base + '/' + rawUrl)
+}
+
+// ==================== 请求候选链 ====================
+// 2026-10 重构：直连永远第一步（实测直连 1~3 秒即通，镜像反而常超时）。
+//   默认     → 直连 → 代理（填了才有）→ 镜像（选了才有）→ jsDelivr（勾了才有）
+//   强制代理 → 代理 → 直连 → 镜像 → jsDelivr（仅把代理权重提前到第一位）
+// 镜像与 jsDelivr 均为兜底；jsDelivr 是「直连 / 代理 / 镜像全失败」后的最后一道。
+// 仅用于 GitHub 爬取链路（树 API / 脚本下载）；音频校验与洛雪网关不走这里。
+var JSD_HOST = 'https://jsdelivr.b-cdn.net' // 实测国内延迟最低（~1s）、3/3 可达
+// raw/owner/repo/ref/path → jsDelivr gh/owner/repo@ref/path
+// ref 原样保留（HEAD 也直接用，jsDelivr 支持；旧代码猜成 main 会误判 master 仓库）
+function jsdelivrUrlFor(rest) {
+  var m = String(rest || '').match(/^([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
+  if (!m) return null
+  return JSD_HOST + '/gh/' + m[1] + '/' + m[2] + '@' + m[3] + '/' + m[4]
+}
 function buildCandidates(url) {
   var proxy = (config && config.proxy) || ''
   var out = []
-  var mirrorUrl = null, mirrorUrl2 = null, jsdUrl = null
+  var mirror = null, jsd = null
   if (url.indexOf('https://raw.githubusercontent.com/') === 0) {
     var rest = url.slice('https://raw.githubusercontent.com/'.length) // owner/repo/ref/path...
-    if (config && config.ghMirror) {
-      var mbase = String(config.ghMirror).trim().replace(/\/+$/, '')
-      if (mbase) {
-        // 镜像有两种拼接流派，并非所有站都兼容两种（如 gh1.lhl.one 仅前缀式），
-        // 两种候选都入链，由回退机制自动选择可用者
-        mirrorUrl = mbase + '/' + rest // 路径式：mirror/owner/repo/ref/path
-        mirrorUrl2 = mbase + '/' + url // 前缀式：mirror/https://raw.githubusercontent.com/...
-      }
-    }
-    // jsDelivr：raw/owner/repo/ref/path → cdn.jsdelivr.net/gh/owner/repo@ref/path
-    var m = rest.match(/^([^/]+)\/([^/]+)\/(HEAD|[^/]+)\/(.*)$/)
-    if (m) jsdUrl = 'https://cdn.jsdelivr.net/gh/' + m[1] + '/' + m[2] + '@' + (m[3] === 'HEAD' ? 'main' : m[3]) + '/' + m[4]
+    if (config && config.ghMirror) mirror = mirrorUrlFor(config.ghMirror, url, rest)
+    if (config && config.useJsdelivr) jsd = jsdelivrUrlFor(rest)
   }
-  function add(u, useProxy) { if (u) out.push({ url: u, useProxy: useProxy }) }
   var force = !!(config && config.forceProxy && proxy)
-  if (force) add(url, true)
-  add(mirrorUrl, false)
-  add(mirrorUrl2, false)
-  add(jsdUrl, false)
-  add(url, false)
-  if (!force && proxy) add(url, true)
+  function add(u, useProxy) { if (u) out.push({ url: u, useProxy: useProxy }) }
+  if (force) { add(url, true); add(url, false) }        // 强制代理：代理权重提前到第一位
+  else { add(url, false); if (proxy) add(url, true) }   // 默认：直连第一，代理紧随其后
+  add(mirror, false)   // 镜像兜底（质量一般，排在代理之后）
+  add(jsd, false)      // jsDelivr 终极兜底（最后一道）
   return out.length ? out : [{ url: url, useProxy: false }]
 }
 
@@ -286,6 +366,14 @@ function crawlFetch(url, options, timeoutMs) {
   options = options || {}
   var candidates = buildCandidates(url)
   var i = 0
+  function candKind(c) {
+    if (c.useProxy) return '代理'
+    if (c.url === url) return '直连'
+    if (String(c.url).indexOf(JSD_HOST) === 0) return 'jsDelivr 加速'
+    var m = String(c.url).match(/^https?:\/\/([^/]+)/)
+    return '镜像 ' + (m ? m[1] : '')
+  }
+  function shortUrl(u) { return String(u).replace('https://raw.githubusercontent.com/', 'raw/').slice(0, 80) }
   function doFetch(c, t) {
     var opts = {}
     for (var k in options) opts[k] = options[k]
@@ -295,24 +383,34 @@ function crawlFetch(url, options, timeoutMs) {
       // 若照单全收会把 HTML 当脚本内容存库。GitHub 爬取链路永远不会合法地返回 HTML，视为候选失败。
       var ct = ''
       try { ct = String((res.headers && res.headers.get('content-type')) || '') } catch (e) {}
-      if (/text\/html/i.test(ct) && i < candidates.length) return attempt()
+      if (/text\/html/i.test(ct) && i < candidates.length) {
+        dlog('返回网页而非文件（假 200）→ 换下一线路：' + shortUrl(c.url))
+        return attempt()
+      }
       return res
     })
   }
   function attempt() {
     if (i >= candidates.length) {
       var last = candidates[candidates.length - 1]
-      return doFetch(last, timeoutMs || 15000) // 全失败时抛最后候选的错误
+      return doFetch(last, timeoutMs || 5000) // 全失败时抛最后候选的错误
     }
     var c = candidates[i++]
-    var t = i > 1 ? Math.min(timeoutMs || 15000, 10000) : (timeoutMs || 15000) // 回退候选用更短超时
+    var t = timeoutMs || 5000 // 所有线路统一超时（不再区分首/回退）
+    var label = '线路 ' + i + '/' + candidates.length + ' ' + candKind(c)
+    var t0 = Date.now()
+    setLine(label)
+    dlog('请求 ' + label + ' ' + shortUrl(c.url) + '（超时 ' + Math.round(t / 1000) + 's）')
     return doFetch(c, t).then(function (res) {
+      dlog('返回 HTTP ' + res.status + ' · ' + (Date.now() - t0) + 'ms · ' + label)
       if (!res.ok && res.status >= 500 && i < candidates.length) return attempt() // 5xx 换下一候选
-      if (res.status === 403 || res.status === 429) { // 镜像限流，换下一候选
+      // 限流 / 镜像不认识该路径（404）：换下一候选，不把镜像的问题当成"音源失效"
+      if (res.status === 403 || res.status === 429 || res.status === 404) {
         if (i < candidates.length) return attempt()
       }
       return res
     }).catch(function (err) {
+      dlog('线路失败（已耗时 ' + (Date.now() - t0) + 'ms）· ' + label + '：' + (err && err.message || err))
       if (i < candidates.length) return attempt()
       throw err
     })
@@ -433,7 +531,9 @@ router.get('/api/config', function () {
     ghMirror: config.ghMirror || '',
     mirrorPresets: MIRROR_PRESETS,
     forceProxy: !!config.forceProxy,
+    useJsdelivr: !!config.useJsdelivr,
     deepCheck: !!config.deepCheck,
+    debugMode: !!config.debugMode,
     maxDeepCheck: config.maxDeepCheck,
     builtinRepos: DEFAULT_REPOS,
     customRepos: config.customRepos || [],
@@ -445,7 +545,9 @@ router.post('/api/config', function (req) {
   if (typeof b.proxy === 'string') config.proxy = b.proxy.trim()
   if (typeof b.ghMirror === 'string') config.ghMirror = b.ghMirror.trim()
   if (typeof b.forceProxy === 'boolean') config.forceProxy = b.forceProxy
+  if (typeof b.useJsdelivr === 'boolean') config.useJsdelivr = b.useJsdelivr
   if (typeof b.deepCheck === 'boolean') config.deepCheck = b.deepCheck
+  if (typeof b.debugMode === 'boolean') config.debugMode = b.debugMode
   if (typeof b.maxDeepCheck === 'number') config.maxDeepCheck = Math.max(1, Math.min(500, b.maxDeepCheck))
   if (Array.isArray(b.reposOverride)) config.reposOverride = b.reposOverride.map(function (s) { return String(s).trim() }).filter(Boolean)
   if (typeof b.ghToken === 'string' && b.ghToken.trim()) {
@@ -464,17 +566,17 @@ router.post('/api/config', function (req) {
 
 var REPO_RE = /^[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/
 
-// ---------- 镜像预设与可用性测试 ----------
-var MIRROR_PRESETS = [
-  'https://proxy.vvvv.ee',
-  'https://ghproxy.net',
-  'https://gh-proxy.com',
-  'https://ghfast.top',
-  'https://gh1.lhl.one'
-]
-// 探针文件：git/git 仓库的 README，长期稳定，任何 raw 镜像都应能拉到
-var PROBE_RAW = 'https://raw.githubusercontent.com/git/git/master/README.md'
+// ---------- 镜像可用性测试 ----------
+// 镜像预设与拼接方式（MIRROR_STYLE）在文件上方「镜像预设」区块统一定义
+// 测试源 = 本插件自己仓库里的 plugin.json：长期存在、体积小（约 1KB）。
+// 实测教训：拿 git/git 这种超大热门仓库当探针时，部分镜像会对它返回 403，导致「测试」误报不可用，
+// 而同一镜像拉取真实音源文件完全正常。探针必须是稳定可控的自有文件。
+// 测试方式 = 真实把文件拉下来：从发起请求到响应体读完计时，显示的即真实拉取延迟。
+var PROBE_RAW = 'https://raw.githubusercontent.com/zlyon/lx-hunter/HEAD/plugin.json'
 var PROBE_REST = PROBE_RAW.slice('https://raw.githubusercontent.com/'.length)
+// 我们 plugin.json 独有的字段，用来确认拉到的确实是这个文件（而不是镜像返回的某个泛化 200 页面）
+var PROBE_MARK = '"entryPath"'
+var PROBE_TIMEOUT_MS = 8000
 
 router.post('/api/test-mirror', function (req) {
   var b = parseBody(req)
@@ -482,35 +584,31 @@ router.post('/api/test-mirror', function (req) {
   if (!mbase) return errResp(400, '缺少 mirror 参数')
   if (!/^https?:\/\//i.test(mbase)) mbase = 'https://' + mbase
   mbase = mbase.replace(/\/+$/, '')
-  // 两种拼接流派都测（并非所有镜像都兼容两种，如 gh1.lhl.one 仅前缀式）
-  var variants = [
-    { style: '路径式', url: mbase + '/' + PROBE_REST },
-    { style: '前缀式', url: mbase + '/' + PROBE_RAW }
-  ]
-  function testOne(v) {
-    var t0 = Date.now()
-    return fetchWithTimeout(v.url, { headers: { 'User-Agent': UA } }, 8000).then(function (res) {
-      var ct = ''
-      try { ct = String((res.headers && res.headers.get('content-type')) || '') } catch (e) {}
-      return res.text().then(function (txt) {
-        var isHtml = /text\/html/i.test(ct) || /^\s*<(!doctype|html)[\s>]/i.test(txt.slice(0, 500))
-        var ok = res.ok && !isHtml && txt.length > 50
-        var err = ''
-        if (!res.ok) err = 'HTTP ' + res.status
-        else if (isHtml) err = '返回的是网页而不是文件（假 200）'
-        else if (txt.length <= 50) err = '内容过短'
-        return { style: v.style, latencyMs: Date.now() - t0, ok: ok, status: res.status, bytes: txt.length, error: err }
-      })
-    }).catch(function (e) {
-      return { style: v.style, latencyMs: Date.now() - t0, ok: false, status: 0, bytes: 0, error: (e && e.message || String(e) + '').slice(0, 120) }
+  // 走与爬取完全相同的 mirrorUrlFor，保证「测试能通」=「爬取能用」，不会各写一套而跑偏
+  var styleLabel = (MIRROR_STYLE[mbase] === 'path') ? '路径式' : '前缀式'
+  var testUrl = mirrorUrlFor(mbase, PROBE_RAW, PROBE_REST)
+  var t0 = Date.now()
+  return fetchWithTimeout(testUrl, { headers: { 'User-Agent': UA } }, PROBE_TIMEOUT_MS).then(function (res) {
+    var ct = ''
+    try { ct = String((res.headers && res.headers.get('content-type')) || '') } catch (e) {}
+    return readBody(res, 'text', PROBE_TIMEOUT_MS, '读取测试响应').then(function (txt) {
+      var latencyMs = Date.now() - t0 // 含建连 + 下载响应体，即真实拉取耗时
+      var isHtml = /text\/html/i.test(ct) || /^\s*<(!doctype|html)[\s>]/i.test(txt.slice(0, 500))
+      var isOurFile = txt.indexOf(PROBE_MARK) !== -1
+      var ok = res.ok && !isHtml && isOurFile
+      var err = ''
+      if (!res.ok) err = 'HTTP ' + res.status
+      else if (isHtml) err = '返回的是网页而不是文件（假 200）'
+      else if (!isOurFile) err = '返回内容不是目标文件'
+      return { style: styleLabel, latencyMs: latencyMs, ok: ok, status: res.status, bytes: txt.length, error: err }
     })
-  }
-  return variants.reduce(function (chain, v) {
-    return chain.then(function (acc) { return testOne(v).then(function (r) { acc.push(r); return acc }) })
-  }, Promise.resolve([])).then(function (results) {
-    var usable = results.filter(function (r) { return r.ok })
-    log('镜像测试 ' + mbase + '：' + (usable.length ? usable.map(function (r) { return r.style + ' ' + r.latencyMs + 'ms' }).join(' / ') : '全部失败'), '设置')
-    return jsonResp({ mirror: mbase, ok: usable.length > 0, results: results })
+  }).catch(function (e) {
+    var msg = String((e && e.message) || e || '网络错误')
+    if (/超时|timeout/i.test(msg)) msg = '超时（' + Math.round(PROBE_TIMEOUT_MS / 1000) + 's 内未响应）'
+    return { style: styleLabel, latencyMs: Date.now() - t0, ok: false, status: 0, bytes: 0, error: msg.slice(0, 120) }
+  }).then(function (r) {
+    log('镜像测试 ' + mbase + '：' + (r.ok ? r.style + ' ' + r.latencyMs + 'ms · ' + r.bytes + 'B' : '失败 · ' + (r.error || '')), '设置')
+    return jsonResp({ mirror: mbase, ok: r.ok, results: [r] })
   })
 })
 
@@ -549,7 +647,7 @@ router.post('/api/crawl', function () {
 router.post('/api/check', function (req) {
   if (job.running) return errResp(409, '已有任务在运行: ' + job.type)
   var b = parseBody(req)
-  startJob('check', { suspectedOnly: !!b.suspectedOnly })
+  startJob('check', { suspectedOnly: !!b.suspectedOnly, manual: true })
   return jsonResp({ started: true })
 })
 router.post('/api/cancel', function () {
@@ -599,8 +697,10 @@ function lxApi(method, path_, bodyObj) {
       headers: { 'Authorization': 'Bearer ' + gw.token, 'Content-Type': 'application/json' }
     }
     if (bodyObj !== undefined) opts.body = JSON.stringify(bodyObj)
+    // 灌入：由洛雪插件自己去下载脚本并导入，属外部依赖（下载耗时不可控），
+    // 不套用爬取链路的 5s 超时，这里给足 30s
     return fetchWithTimeout(gw.url, opts, 30000).then(function (res) {
-      return res.text().then(function (text) {
+      return readBody(res, 'text', 30000, '读取洛雪响应').then(function (text) {
         var data = null
         try { data = text ? JSON.parse(text) : null } catch (e) {}
         return { status: res.status, ok: res.status < 400, data: data, text: text }
@@ -817,7 +917,17 @@ router.post('/api/import', function (req) {
 
 router.post('/api/import-cancel', function () {
   if (!importState.running) return errResp(409, '没有进行中的导入')
-  importState.cancelRequested = true
+  if (!importState.cancelRequested) {
+    importState.cancelRequested = true
+    log('正在取消灌入…（处理完当前音源即停止）', '灌入', 'warn')
+    // 兜底：取消后当前步骤最多再等 5 秒（与全局单步超时一致）即强制释放任务位
+    setTimeout(safeAsync('灌入取消兜底', function () {
+      if (importState.running && importState.cancelRequested) {
+        importState.running = false
+        log('用户取消: 已强制结束', '灌入', 'warn')
+      }
+    }), 5000)
+  }
   return jsonResp({ cancelRequested: true })
 })
 
@@ -830,6 +940,7 @@ router.get('/api/import-status', function () {
   }
   return jsonResp({
     running: importState.running,
+    cancelRequested: !!importState.cancelRequested,
     total: importState.total || importState.results.length,
     done: done,
     current: current,
@@ -930,12 +1041,13 @@ function runImport(targets) {
           if (lm) e.lastModified = Date.parse(lm) || 0
         } catch (e2) {}
       }
-      return res.text()
+      return readBody(res, 'text', config.checkTimeoutMs, '读取脚本')
     }).then(function (text) {
       if (!e.contentHash) e.contentHash = sha256Str(text)
       if (!e.lxName) e.lxName = lxNameFromScript(text)
     }).catch(function () { if (!e.contentHash) e.contentHash = '' })
   })).then(function () {
+    if (importState.cancelRequested) return // 预处理（脚本下载）阶段即被取消，不再拉洛雪列表
     return lxListSources().then(function (list) {
       var knownIds = {}
       for (var eid in imported) if (imported[eid].lxId) knownIds[String(imported[eid].lxId)] = true
@@ -944,14 +1056,20 @@ function runImport(targets) {
   })
 
   function next() {
-    if (idx >= queue.length || importState.cancelRequested) { importState.running = false; return }
+    if (idx >= queue.length || importState.cancelRequested) {
+      var wasRunning = importState.running
+      importState.running = false
+      // 取消一律叫「用户取消」；若已被兜底强制释放过则不重复记录
+      if (importState.cancelRequested && wasRunning) log('用户取消', '灌入', 'warn')
+      return
+    }
     var item = queue[idx++]
     var e = item.e
     var name = e.scriptName || e.name
     if (item.skip) {
       importState.results.push({ id: e.id, name: name, status: 'skipped', message: item.skip })
       log('跳过灌入：' + name + ' — ' + item.skip, '灌入', 'warn')
-      return setTimeout(next, 50)
+      return setTimeout(safeAsync('灌入队列', next), 50)
     }
     importState.results.push({ id: e.id, name: name, status: 'importing' })
     lxApi('POST', '/api/sources/import-url', { url: e.url }).then(function (r) {
@@ -973,13 +1091,13 @@ function runImport(targets) {
       }
       log('灌入失败：' + name + ' — ' + (err && err.message || err), '灌入', 'warn')
     }).then(function () {
-      setTimeout(next, 800) // 轻微限速，给 lxmusic 加载脚本的时间
+      setTimeout(safeAsync('灌入队列', next), 800) // 轻微限速，给 lxmusic 加载脚本的时间
     })
   }
 
   prep.then(function () { next() }).catch(function (e) {
     importState.running = false
-    log('灌入预处理失败：' + (e && e.message || e), '灌入', 'error')
+    log('灌入预处理失败：' + humanErr(e), '灌入', 'error')
   })
 }
 
@@ -1029,65 +1147,130 @@ router.post('/api/revoke', function (req) {
   })
 })
 
+// ==================== 步骤现场（排查任务中断用） ====================
+// 任务被宿主中断（错误信息 interrupted）时，光看「任务异常: interrupted」无法知道断在哪。
+// 因此把「当前正在做什么」记在 job.step / job.line 上，报错时一并输出；
+// 并在单步长时间无返回时主动告警 —— 这是唯一能在「卡住过程中」留下线索的手段。
+// 阈值取 15s：高于全局单步超时（5s）三倍，正常重试不会误报，
+// 只有某一步真的挂住（超时机制也失效）时才会出现。
+var STEP_WARN_MS = 15000
+var STEP_WARN_REPEAT_MS = 30000
+var stepTimer = null
+function stepDesc() {
+  var s = job.step || ''
+  if (job.line) s += (s ? ' · ' : '') + job.line
+  return s
+}
+function stepWatchTick() {
+  stepTimer = null
+  if (!job.running || !stepDesc()) return
+  var secs = Math.round((Date.now() - (job.stepAt || Date.now())) / 1000)
+  log('单步耗时较长：' + stepDesc() + ' 已 ' + secs + 's 未返回，仍在等待（若随后出现任务中断，问题就在这一步）', '任务', 'warn')
+  stepTimer = setTimeout(safeAsync('步骤看门狗', stepWatchTick), STEP_WARN_REPEAT_MS)
+}
+function armStepWatch() {
+  if (stepTimer) { clearTimeout(stepTimer); stepTimer = null }
+  if (!job.running || !stepDesc()) return
+  stepTimer = setTimeout(safeAsync('步骤看门狗', stepWatchTick), STEP_WARN_MS)
+}
+// 进入新的外层步骤：作废内层线路信息，重新计时
+function setStep(desc) {
+  job.step = desc || ''
+  job.line = ''
+  job.stepAt = Date.now()
+  dlog('步骤 → ' + job.step)
+  armStepWatch()
+}
+// 外层步骤不变，只更新正在走的线路（由 crawlFetch 调用）
+function setLine(desc) {
+  job.line = desc || ''
+  job.stepAt = Date.now()
+  armStepWatch()
+}
+function clearStep() {
+  job.step = ''
+  job.line = ''
+  if (stepTimer) { clearTimeout(stepTimer); stepTimer = null }
+}
+
 // ==================== 任务：爬取 + 检测 ====================
 var heartbeatTimer = null
 function touchTick() { job.tick = Date.now() }
 function startHeartbeat() {
   stopHeartbeat()
-  heartbeatTimer = setInterval(function () {
+  heartbeatTimer = setInterval(safeAsync('任务心跳', function () {
     if (!job.running) { stopHeartbeat(); return }
     var idle = Date.now() - (job.tick || 0)
+    var at = stepDesc()
     if (idle > 300000) { // 5 分钟无任何进展：判定卡死，释放任务位便于重新发起
-      log('任务已 5 分钟无进展，疑似卡住，自动结束。可直接重新点击「开始爬取 / 可用性检测」。', '任务', 'error')
+      log('任务终止: 已 5 分钟无进展，疑似卡住，自动结束' + (at ? '（最后停在：' + at + '）' : '') + '。可直接重新点击「开始爬取 / 可用性检测」。', '任务', 'error')
       job.running = false
       stopHeartbeat()
+      clearStep()
       saveDbSoon().catch(function () {})
       return
     }
-    log('任务心跳：' + job.type + ' 运行中（最近活动 ' + Math.round(idle / 1000) + 's 前）', '任务')
-  }, 60000)
+    log('任务心跳：' + job.type + ' 运行中（最近活动 ' + Math.round(idle / 1000) + 's 前' + (at ? ' · 停在：' + at : '') + '）', '任务')
+  }), 60000)
 }
 
-// 取消后 20 秒当前步骤仍未让出（如沙箱调用挂死），强制释放任务位，保证取消必然生效
+// 取消后 5 秒当前步骤仍未让出（如沙箱调用挂死），强制释放任务位，保证取消必然生效
 function armCancelReaper() {
-  setTimeout(function () {
+  setTimeout(safeAsync('取消兜底', function () {
     if (job.running && job.cancelRequested) {
-      log('取消超时（当前步骤未能及时响应），已强制结束任务。可直接重新发起。', '任务', 'warn')
+      log('用户取消: 已强制结束（当前停在：' + (stepDesc() || '未知步骤') + '）', '任务', 'warn')
       job.running = false
       stopHeartbeat()
+      clearStep()
       saveDbSoon().catch(function () {})
     }
-  }, 20000)
+  }), 5000)
 }
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null } }
 
 function startJob(type, opts) {
-  job = { running: true, type: type, cancelRequested: false, progress: {}, tick: Date.now() }
+  job = { running: true, type: type, cancelRequested: false, progress: {}, tick: Date.now(), deepRan: false, step: '', stepAt: 0, line: '' }
   startHeartbeat()
   var p = job.progress
+  var run
   if (type === 'crawl') {
     p.reposTotal = allRepos().length
     p.reposDone = 0
     p.linksFound = 0
     p.added = 0
-    runCrawl().then(function () { return runCheckPhase(opts || {}) }).catch(function (e) {
-      log('任务异常: ' + (e && e.message || e), '任务', 'error')
-    }).then(function () {
-      job.running = false
-      stopHeartbeat()
-      log('任务结束', '任务')
-      return saveDbSoon()
-    })
+    run = runCrawl().then(function () { return runCheckPhase(opts || {}) })
   } else {
-    runCheckPhase(opts || {}).catch(function (e) {
-      log('任务异常: ' + (e && e.message || e), '任务', 'error')
-    }).then(function () {
-      job.running = false
-      stopHeartbeat()
-      log('任务结束', '任务')
-      return saveDbSoon()
-    })
+    run = runCheckPhase(opts || {})
   }
+  // 调试模式：把本次任务的关键参数记下来，便于对照日志排查（代理凭据做脱敏）
+  dlog('任务启动 type=' + type + ' · 收录 ' + Object.keys(db.sources).length + ' 条' +
+    ' · 镜像 ' + (config.ghMirror || '无') +
+    ' · 代理 ' + (config.proxy ? String(config.proxy).replace(/\/\/[^/@]*@/, '//***@') : '无') + (config.forceProxy ? '(强制优先)' : '') +
+    ' · 单步超时 ' + Math.round((config.checkTimeoutMs || 5000) / 1000) + 's' +
+    ' · 自动深度检测 ' + (config.deepCheck ? '开' : '关') + (opts && opts.manual ? ' · 手动触发' : ''))
+  run.then(function () {
+    job.running = false
+    stopHeartbeat()
+    clearStep()
+    // 结语按实际走到哪一步：取消 → 终止；跑完深度检测 → 完成；只跑完基础检测 → 结束
+    if (job.cancelRequested) log('用户取消', '任务', 'warn')
+    else log(job.deepRan ? '任务完成' : '任务结束', '任务')
+    return saveDbSoon().catch(function () {})
+  }, function (e) {
+    var at = stepDesc()
+    job.running = false
+    stopHeartbeat()
+    clearStep()
+    log('任务终止: ' + humanErr(e) + (at ? '（发生在：' + at + '）' : ''), '任务', 'error')
+    return saveDbSoon().catch(function () {})
+  }).catch(function (e) {
+    // 收尾本身出错也不能让它逃出去（逃出去会被宿主当成插件异常重载 VM）
+    var at = stepDesc()
+    job.running = false
+    stopHeartbeat()
+    clearStep()
+    log('任务收尾异常（已拦截）: ' + humanErr(e) + (at ? '（发生在：' + at + '）' : ''), '系统', 'error')
+  })
 }
 
 function ghTreeUrl(repo) {
@@ -1109,6 +1292,8 @@ function extractCandidates(tree, repo) {
 }
 
 function allRepos() {
+  // 调试 / 测试用：显式指定仓库清单时只跑这些（前端不会下发该字段，不影响正常使用）
+  if (Array.isArray(config.reposOverride) && config.reposOverride.length) return config.reposOverride.slice()
   var out = DEFAULT_REPOS.slice()
   if (Array.isArray(config.customRepos)) {
     for (var i = 0; i < config.customRepos.length; i++) {
@@ -1121,7 +1306,7 @@ function allRepos() {
 // 爬取前查配额：/rate_limit 端点本身不消耗配额
 function checkQuota(need) {
   return fetchWithTimeout('https://api.github.com/rate_limit', { headers: ghHeaders() }, 8000)
-    .then(function (res) { return res.text() })
+    .then(function (res) { return readBody(res, 'text', 5000, '读取配额响应') })
     .then(function (text) {
       var j
       try { j = JSON.parse(text) } catch (e) { return { ok: true } }
@@ -1151,8 +1336,9 @@ function runCrawl() {
     touchTick()
     var repo = repos[idx++]
     job.progress.reposDone = idx
-    return fetchWithTimeout(ghTreeUrl(repo), { headers: ghHeaders() }, 20000)
-      .then(function (res) { return res.text() })
+    setStep('爬取仓库 ' + idx + '/' + repos.length + ' ' + repo)
+    return fetchWithTimeout(ghTreeUrl(repo), { headers: ghHeaders() }, 5000)
+      .then(function (res) { return readBody(res, 'text', 5000, '读取仓库文件树') })
       .then(function (text) {
         var tree
         try { tree = JSON.parse(text) } catch (e) { throw new Error('响应解析失败') }
@@ -1207,7 +1393,7 @@ function checkEntryBasic(entry) {
   return crawlFetch(entry.url, { headers: { 'User-Agent': UA } }, config.checkTimeoutMs)
     .then(function (res) {
       if (!res.ok) { entry.status = 'dead'; entry.error = 'HTTP ' + res.status; return }
-      return res.text().then(function (text) {
+      return readBody(res, 'text', config.checkTimeoutMs, '读取脚本').then(function (text) {
         if (text.length > MAX_CONTENT_BYTES) { entry.status = 'dead'; entry.error = '文件过大'; return }
         entry.size = text.length
         entry.contentHash = sha256Str(text)
@@ -1246,11 +1432,11 @@ function sanitizeEnvName(id) {
   return 'hunter_' + out.slice(0, 60)
 }
 
-// 下载音源脚本内容：走 crawlFetch 候选链（镜像 → jsDelivr → 直连 → 代理），与爬取同路
+// 下载音源脚本内容：走 crawlFetch 候选链（直连 → 代理 → 镜像 → jsDelivr），与爬取同路
 function fetchText(url, timeoutMs) {
-  return crawlFetch(url, { headers: { 'User-Agent': UA } }, timeoutMs || 15000).then(function (res) {
+  return crawlFetch(url, { headers: { 'User-Agent': UA } }, timeoutMs || 5000).then(function (res) {
     if (!res.ok) throw new Error('HTTP ' + res.status)
-    return res.text()
+    return readBody(res, 'text', timeoutMs || 5000, '读取脚本')
   })
 }
 
@@ -1274,12 +1460,12 @@ function verifyUrl(url) {
     }
     fetchWithTimeout(url, {
       headers: { 'Range': 'bytes=0-16383', 'User-Agent': UA }
-    }, 12000).then(function (res) {
+    }, 5000).then(function (res) {
       var ct = ''
       try { ct = res.headers.get('content-type') || '' } catch (e) {}
       if (/json|text\/html|text\/plain/i.test(ct)) { resolve({ ok: false, reason: '返回 ' + ct + '，非音频' }); return }
       if (!res.ok && res.status !== 206) { resolve({ ok: false, reason: 'HTTP ' + res.status }); return }
-      return res.arrayBuffer().then(function (ab) {
+      return readBody(res, 'arrayBuffer', 5000, '读取音频头').then(function (ab) {
         var bytes = new Uint8Array(ab)
         var ascii = ''
         for (var i = 0; i < Math.min(bytes.length, 16); i++) ascii += String.fromCharCode(bytes[i])
@@ -1307,7 +1493,7 @@ function extractMeta(code) {
 function deepCheckViaJsenv(entry, code) {
   var envName = sanitizeEnvName(entry.id)
   var result = { checkedAt: Date.now(), loadable: false, loadError: null, inited: false, platforms: {} }
-  function cleanup() { return withTimeout(songloft.jsenv.destroy(envName).catch(function () {}), 8000, '销毁沙箱') }
+  function cleanup() { return withTimeout(songloft.jsenv.destroy(envName).catch(function () {}), 5000, '销毁沙箱') }
 
   var meta = extractMeta(code)
   result.version = meta.version
@@ -1318,12 +1504,18 @@ function deepCheckViaJsenv(entry, code) {
     author: meta.author, homepage: meta.homepage, rawScript: code
   }) + ';'
 
-  return withTimeout(songloft.jsenv.create(envName, BOOTSTRAP), 15000, '创建沙箱').then(function () {
-    return withTimeout(songloft.jsenv.execute(envName, infoCode, 5000), 8000, '注入 scriptInfo').then(function (r) {
+  var tEnv = Date.now()
+  dlog('沙箱创建… ' + (entry.name || entry.id))
+  return withTimeout(songloft.jsenv.create(envName, BOOTSTRAP), 5000, '创建沙箱').then(function () {
+    dlog('沙箱就绪 ' + (Date.now() - tEnv) + 'ms · 注入 scriptInfo…')
+    return withTimeout(songloft.jsenv.execute(envName, infoCode, 5000), 5000, '注入 scriptInfo').then(function (r) {
       if (r && r.error) throw new Error('注入 scriptInfo 失败: ' + String(r.error).slice(0, 120))
     })
   }).then(function () {
-    return withTimeout(songloft.jsenv.executeWait(envName, code, 30000, ['inited']), 40000, '脚本初始化').then(function (r) {
+    var tInit = Date.now()
+    dlog('脚本初始化…（' + code.length + ' 字节）')
+    return withTimeout(songloft.jsenv.executeWait(envName, code, 5000, ['inited']), 5000, '脚本初始化').then(function (r) {
+      dlog('脚本初始化返回 ' + (Date.now() - tInit) + 'ms' + (r && r.error ? '（错误：' + String(r.error).slice(0, 80) + '）' : ''))
       if (r.error) { result.loadError = String(r.error).slice(0, 200); return cleanup().then(function () { return result }) }
       var initedEv = null
       for (var i = 0; i < (r.events || []).length; i++) if (r.events[i].name === 'inited') initedEv = r.events[i]
@@ -1352,6 +1544,7 @@ function testPlatforms(envName, result) {
     var lastMsg = ''
     var trySong = function (i) {
       if (i >= songs.length || job.cancelRequested) {
+        if (lastMsg) dlog('平台 ' + src + ' 判定失败：' + lastMsg)
         result.platforms[src] = { status: 'failed', message: lastMsg || '未知失败' }
         return Promise.resolve()
       }
@@ -1361,8 +1554,12 @@ function testPlatforms(envName, result) {
       var code = 'lx._dispatch(' + JSON.stringify(reqId) + ', "request", ' + JSON.stringify(payload) + ');'
       // 每次取链尝试都算"活动"：防止单条音源耗时过长被 5 分钟 watchdog 误杀
       touchTick()
-      return withTimeout(songloft.jsenv.executeWait(envName, code, 20000, ['dispatchResult', 'dispatchError']), 30000, '取链请求').then(function (r) {
-        if (r.error) { lastMsg = '「' + song.name + '」' + String(r.error).slice(0, 80); return trySong(i + 1) }
+      setStep('沙箱取链 ' + src + ' 试听 ' + (i + 1) + '/' + songs.length + ' · ' + (result.lxName || envName))
+      dlog('沙箱取链 ' + src + ' 试听「' + song.name + '」…')
+      // 每一次失败都记一行调试日志：能看出是哪首歌、哪个平台拖慢或失败
+      function fail(reason) { lastMsg = '「' + song.name + '」' + reason; dlog('试听 ' + src + '「' + song.name + '」失败：' + reason); return trySong(i + 1) }
+      return withTimeout(songloft.jsenv.executeWait(envName, code, 5000, ['dispatchResult', 'dispatchError']), 5000, '取链请求').then(function (r) {
+        if (r.error) return fail(String(r.error).slice(0, 80))
         var ev = null
         for (var j = 0; j < (r.events || []).length; j++) {
           var name = r.events[j].name
@@ -1373,8 +1570,8 @@ function testPlatforms(envName, result) {
           ev = { name: name, data: data }
           break
         }
-        if (!ev) { lastMsg = '「' + song.name + '」无响应'; return trySong(i + 1) }
-        if (ev.name === 'dispatchError') { lastMsg = '「' + song.name + '」' + String(ev.data.error || '脚本失败').slice(0, 80); return trySong(i + 1) }
+        if (!ev) return fail('无响应')
+        if (ev.name === 'dispatchError') return fail(String(ev.data.error || '脚本失败').slice(0, 80))
         var ret = ev.data.result
         if (typeof ret === 'string' && ret.indexOf('http') === 0) {
           return verifyUrl(ret).then(function (v) {
@@ -1382,12 +1579,10 @@ function testPlatforms(envName, result) {
               result.platforms[src] = { status: 'usable', message: '测试歌曲「' + song.name + '」返回真实音频' }
               return Promise.resolve()
             }
-            lastMsg = '「' + song.name + '」链接不可播: ' + v.reason
-            return trySong(i + 1)
+            return fail('链接不可播: ' + v.reason)
           })
         }
-        lastMsg = ret == null || ret === '' ? '「' + song.name + '」返回空链接' : '「' + song.name + '」返回异常: ' + String(ret).slice(0, 60)
-        return trySong(i + 1)
+        return fail(ret == null || ret === '' ? '返回空链接' : '返回异常: ' + String(ret).slice(0, 60))
       })
     }
     return trySong(0).then(next)
@@ -1464,6 +1659,7 @@ function dedupeSources() {
 // ---------- 检测阶段 ----------
 function runCheckPhase(opts) {
   var suspectedOnly = opts && opts.suspectedOnly
+  var manual = !!(opts && opts.manual) // 手动点「可用性检测」：不受"爬取后自动执行"开关限制
   var all = Object.keys(db.sources).map(function (k) { return db.sources[k] })
   // 1) 基础可达性检测：所有 unknown 或 已失效的（复验）
   var toCheck = all.filter(function (e) { return e.status === 'unknown' || e.status === 'dead' })
@@ -1479,6 +1675,7 @@ function runCheckPhase(opts) {
       touchTick()
       var entry = toCheck[idx++]
       job.progress.checkDone++
+      setStep('基础检测 ' + idx + '/' + toCheck.length + ' ' + (entry.name || entry.id))
       return checkEntryBasic(entry).then(function () {
         // 阶段中途定期落盘：VM 意外重载时不至于整段丢失
         if (job.progress.checkDone - savedSince >= 20) {
@@ -1495,7 +1692,11 @@ function runCheckPhase(opts) {
   return basicDone.then(function () {
     var dd = dedupeSources()
     if (dd.total) log('入库去重：废弃 ' + dd.total + ' 条（同内容 ' + dd.dupContent + ' / 同名旧版本 ' + dd.oldVersion + '），不参与可用性检测', '检测')
-    if (!config.deepCheck || job.cancelRequested) return
+    if (job.cancelRequested) return
+    if (!manual && !config.deepCheck) {
+      log('未开启自动可用性检测', '检测', 'warn')
+      return
+    }
     var targets = all.filter(function (e) {
       if (e.deprecated) return false // 已废弃（重复/旧版本）：绝不参与可用性检测
       if (!e.suspected || e.status !== 'ok') return false
@@ -1507,6 +1708,7 @@ function runCheckPhase(opts) {
     var batchSize = Math.max(1, config.maxDeepCheck)
     job.progress.deepTotal = targets.length
     job.progress.deepDone = 0
+    job.deepRan = true
     log('可用性检测 ' + targets.length + ' 个音源（jsenv 沙箱）…', '可用性')
     var didx = 0
     function nextDeep() {
@@ -1514,6 +1716,7 @@ function runCheckPhase(opts) {
       touchTick()
       var entry = targets[didx++]
       job.progress.deepDone = didx
+      setStep('可用性检测 ' + didx + '/' + targets.length + ' ' + (entry.name || entry.id))
       return crawlFetch(entry.url, { headers: { 'User-Agent': UA } }, config.checkTimeoutMs).then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status)
         // 源文件最后更新时间（HTTP Last-Modified），同名异源"只保留最新"的排序依据；拿不到为 0
@@ -1522,9 +1725,10 @@ function runCheckPhase(opts) {
           var lm = res.headers && res.headers.get('last-modified')
           if (lm) entry.lastModified = Date.parse(lm) || 0
         } catch (e2) {}
-        return res.text()
+        return readBody(res, 'text', config.checkTimeoutMs, '读取音源脚本')
       }).then(function (code) {
         entry.contentHash = sha256Str(code)
+        setStep('可用性检测 ' + didx + '/' + targets.length + ' ' + (entry.name || entry.id) + ' · 沙箱检测')
         return deepCheckViaJsenv(entry, code).then(function (r) {
           entry.deep = r
           entry.usable = false
@@ -1539,7 +1743,7 @@ function runCheckPhase(opts) {
         log('可用性检测异常：' + entry.name + ' — ' + (e && e.message || e), '可用性', 'warn')
       }).then(function () {
         // 落盘加兜底超时：storage 假死时不至于卡住整个检测队列
-        return withTimeout(saveDbSoon(), 15000, '落盘').catch(function () {}).then(function () { return sleep(200) }).then(function () {
+        return withTimeout(saveDbSoon(), 5000, '落盘').catch(function () {}).then(function () { return sleep(200) }).then(function () {
           if (didx === targets.length) log('可用性检测全部完成：' + didx + '/' + targets.length, '可用性')
           else if (didx % batchSize === 0) log('已测完 ' + didx + ' 个，自动继续下一批…', '可用性')
           else if (didx % 10 === 0) log('可用性检测进度：' + didx + '/' + targets.length, '可用性')
@@ -1575,14 +1779,20 @@ function initChain() {
         repos: DEFAULT_REPOS.slice(),
         deepCheck: true,
         maxDeepCheck: 60,
-        checkTimeoutMs: 15000,
+        checkTimeoutMs: 5000,
         maxCandidatesPerRepo: 300,
         maxContentBytes: MAX_CONTENT_BYTES,
         forceProxy: false,
+        useJsdelivr: false,
+        debugMode: false,
         ghToken: ''
       }
     }
     if (!Array.isArray(config.repos) || !config.repos.length) config.repos = DEFAULT_REPOS.slice()
+    if (typeof config.checkTimeoutMs !== 'number') config.checkTimeoutMs = 5000
+    if (typeof config.maxCandidatesPerRepo !== 'number') config.maxCandidatesPerRepo = 300
+    if (typeof config.forceProxy !== 'boolean') config.forceProxy = false
+    if (typeof config.ghToken !== 'string') config.ghToken = ''
     return songloft.storage.get(DB_KEY)
   }).then(function (raw) {
     if (raw) {
@@ -1605,24 +1815,31 @@ function initChain() {
   })
 }
 
+// 每次插件实例的短标识：日志里出现新的实例号，说明宿主重载过插件
+var INSTANCE_ID = String(Date.now()).slice(-6)
 globalThis.onInit = function () {
-  log('音源猎手插件初始化…', '系统')
+  log('音源猎手插件初始化…（实例 ' + INSTANCE_ID + '）', '系统')
   ensureLoaded() // 后台加载，不阻塞宿主
   // 同步返回：宿主拿到非 Promise 值立即继续，杜绝热重载死锁
 }
 
 globalThis.onDeinit = function () {
+  // 关键埋点：宿主卸载 / 重载插件时，此前日志里毫无痕迹，等于把最可疑的一条线整个丢掉。
+  // 「任务异常: interrupted」最可能的成因就是这一条 —— 只有记下来才能定案。
+  log('插件被卸载 / 重载（实例 ' + INSTANCE_ID + '）：进行中的任务已中断' +
+    (job.running ? '（当时停在：' + (stepDesc() || '未知步骤') + '）' : ''), '系统', 'warn')
   job.cancelRequested = true
   stopHeartbeat()
+  clearStep()
   saveDbSoon().catch(function () {}) // 后台落盘，不阻塞宿主 deinit
 }
 
 globalThis.onHTTPRequest = function (req) {
-  // 首个请求前确保数据已加载完成（onInit 为异步后台加载）；8s 超时兜底防 storage 挂起
+  // 首个请求前确保数据已加载完成（onInit 为异步后台加载）；5s 超时兜底防 storage 挂起
   var ready = ensureLoaded()
   return Promise.race([
     ready,
-    new Promise(function (resolve) { setTimeout(resolve, 8000) })
+    new Promise(function (resolve) { setTimeout(resolve, 5000) })
   ]).then(function () {
     return router.handle(req)
   }).then(function (resp) {

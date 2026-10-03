@@ -117,6 +117,8 @@
   /* ===== 设置页 ===== */
   .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
   .form-row label { width: 130px; color: var(--muted); font-size: 13px; flex-shrink: 0; }
+  /* 复选框标签由内容决定宽度：否则会被上面的 130px 压住，配合 nowrap 溢出并压到后面的说明文字 */
+  .form-row label.chk { width: auto; }
   .form-row .hint { color: var(--muted); font-size: 12px; }
   #mirrorTestResult.ok { color: var(--green); font-weight: 600; font-size: 13px; }
   #mirrorTestResult.fail { color: var(--red); font-weight: 600; font-size: 13px; }
@@ -171,7 +173,7 @@
       <button class="nav-item" data-view="settings"><span class="ico">⚙️</span>设置</button>
     </nav>
     <div class="side-foot">
-      <div class="foot-line">v1.4.19 · 作者 zlyon</div>
+      <div class="foot-line">v1.4.20 · 作者 zlyon</div>
       <a class="foot-about" href="https://github.com/zlyon/lx-hunter" target="_blank" rel="noopener">ℹ️ 关于 · GitHub 仓库</a>
     </div>
   </aside>
@@ -256,6 +258,7 @@
         </div>
         <div class="btns" style="margin-bottom:12px">
           <button id="btnDoImport" class="ok">灌入所选</button>
+          <button id="btnCancelImport" class="ghost danger" style="display:none">取消灌入</button>
           <button id="btnSyncLx" class="ghost">同步洛雪ID</button>
           <button id="btnRefreshImport" class="ghost">刷新</button>
         </div>
@@ -326,12 +329,12 @@
           <span class="hint" id="mirrorTestResult"></span>
         </div>
         <div class="form-row">
-          <span class="hint" style="width:auto">镜像会真实拉取 GitHub 文件验证（识别假 200），并在 路径式/前缀式 两种拼接间自动回退；不使用镜像时走 jsDelivr → 直连 → 代理</span>
+          <label>强制代理</label>
+          <label class="chk"><input type="checkbox" id="cfgForceProxy"> 把代理权重提前</label>
         </div>
         <div class="form-row">
-          <label>强制代理</label>
-          <label class="chk"><input type="checkbox" id="cfgForceProxy"> 最优先走代理爬取</label>
-          <span class="hint">勾选：代理 → 镜像 → 直连；不勾选（默认）：镜像 → 直连 → 代理。与镜像不互斥，仅调整优先级</span>
+          <label>jsDelivr 加速</label>
+          <label class="chk"><input type="checkbox" id="cfgUseJsdelivr"> 启用</label>
         </div>
         <div class="form-row">
           <label>GitHub Token</label>
@@ -353,6 +356,10 @@
           <label>每批数量</label>
           <label class="chk"><input type="number" id="cfgMaxDeep" min="1" max="500"> 个</label>
           <span class="hint">每测完一批自动继续下一批，直到全部测完；此数值仅为分批展示粒度</span>
+        </div>
+        <div class="form-row">
+          <label>调试模式</label>
+          <label class="chk"><input type="checkbox" id="cfgDebug"> 输出详细日志</label>
         </div>
         <div class="btns"><button id="btnSaveCfg">保存设置</button></div>
       </div>
@@ -377,6 +384,6 @@
 
 <!-- 静态资源必须走 static/ 子路径（宿主公开路由 /api/v1/jsplugin/<id>/static/*，免鉴权）；
      写成 app.js 会被解析到插件根路由 → 要求 JWT → 401 -->
-<script src="static/app.js?v=1.4.19"></script>
+<script src="static/app.js?v=1.4.20"></script>
 </body>
 </html>
