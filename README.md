@@ -1,6 +1,6 @@
 # 音源猎手 (LX Source Hunter)
 
-Songloft JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回。需要先安装洛雪音乐插件，*注意：Songloft 2.0不再支持洛雪音乐插件
+Songloft JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回。需要先安装洛雪音乐插件。
 
 ![版本](https://img.shields.io/badge/version-1.4.19-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
