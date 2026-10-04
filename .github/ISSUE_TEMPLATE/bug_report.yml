@@ -27,9 +27,10 @@ body:
     id: host_env
     attributes:
       label: 宿主环境
-      description: 你在什么设备 / 系统上运行 Songloft
+      description: 你用什么设备 / 系统打开 Songloft（手机端与桌面端表现差异较大，请如实选择）
       options:
-        - 飞牛 fnOS
+        - 飞牛 fnOS（NAS 网页端）
+        - 飞牛 App（手机 / 平板）
         - Windows
         - Docker（群晖 / unRAID / 其它）
         - 群晖 DSM（套件安装）
