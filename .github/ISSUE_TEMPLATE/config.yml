@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 使用说明 / 常见问题
+    url: https://github.com/zlyon/lx-hunter#readme
+    about: 安装、GitHub Token 配置、仓库管理等先看这里，很多问题已有答案
+  - name: ⬇️ 下载最新版本
+    url: https://github.com/zlyon/lx-hunter/releases
+    about: 先确认你用的是最新版，旧版本的问题可能已经修好了

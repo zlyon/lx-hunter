@@ -1,0 +1,156 @@
+name: 问题反馈
+description: 卡住 / 报错 / 灌入失败 / 界面异常等，按这项表填能最快定位
+title: "[反馈] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提交前请先做三件事
+
+        1. **先开「调试模式」再复现一次** → 设置 → 检测 → 勾选「输出详细日志」，然后重现问题。
+           调试模式会记录每一步走到哪条线路、耗时多久，这是定位问题最快的一条线。
+        2. **日志别只发最后一行** → 请把出问题**前后 30~100 行**一起复制。只发一句「失败了」无从判断是网络、脚本还是宿主的问题。
+        3. **敏感信息先打码** → GitHub Token、代理账号密码、不想公开的地址。
+
+        > ⚠️ **绝对不要把 GitHub Token 贴进来**。它等同于账号凭据，一旦贴出请立即去 GitHub 撤销并重新生成。
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: 插件版本
+      description: 插件页面底部「关于」区域可见，例如 1.4.20
+      placeholder: 1.4.20
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host_env
+    attributes:
+      label: 宿主环境
+      description: 你在什么设备 / 系统上运行 Songloft
+      options:
+        - 飞牛 fnOS
+        - Windows
+        - Docker（群晖 / unRAID / 其它）
+        - 群晖 DSM（套件安装）
+        - Linux 服务器 / VPS
+        - 其它（在「补充说明」里写明）
+    validations:
+      required: true
+
+  - type: input
+    id: host_detail
+    attributes:
+      label: 宿主版本与设备
+      description: Songloft 版本 + 设备型号 / 内存，能写多少写多少
+      placeholder: Songloft 2.6.x · 飞牛 DXP4800 Plus · 8G 内存
+    validations:
+      required: false
+
+  - type: dropdown
+    id: lx_plugin
+    attributes:
+      label: 「洛雪音源」(lxmusic) 插件状态
+      description: 灌入 / 撤回这两步完全依赖它，它的状态会直接决定结果
+      options:
+        - 已安装，平时能正常搜索播放
+        - 已安装，但它本身也有异常
+        - 未安装
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 问题出现在哪一步
+      options:
+        - 安装 / 更新插件
+        - 爬取（扫描仓库链接）
+        - 基础检测（可访问性）
+        - 可用性检测（深度检测）
+        - 灌入洛雪音源插件
+        - 撤回已灌入音源
+        - 界面显示 / 交互
+        - 其它
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: 复现频率
+      options:
+        - 每次都能复现
+        - 偶发（有时好有时坏）
+        - 只出现过一次
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 现象描述
+      description: 实际发生了什么？界面上有没有报错文字 / 提示？
+      placeholder: |-
+        点了「开始爬取」，进度停在 32/93 不动了，界面也没有任何提示。
+        日志最后一行是「任务终止: interrupted」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开插件开始，一步一步写清楚
+      placeholder: |-
+        1. 打开插件 → 设置，勾选「爬取后自动执行 jsenv 可用性检测」
+        2. 回「源库」点「开始爬取」
+        3. 等可用性检测跑到 32/93 时卡住，不再前进
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 设置页里的相关配置
+      description: 代理、镜像、几个开关的当前状态。**代理账号密码不要贴**，写「已填」即可
+      placeholder: |-
+        代理：已填（本机 7897，账号密码不贴）
+        raw 加速镜像：不使用镜像
+        强制代理：未勾选
+        jsDelivr 加速：未勾选
+        爬取后自动执行 jsenv 可用性检测：已勾选
+        调试模式：已勾选
+        GitHub Token：已配置
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 插件日志（最关键的一项）
+      description: 在「源库」页的日志区用鼠标选中复制，贴出问题前 30~100 行，保留开头的 [时间][模块] 前缀。出现「任务异常 / 任务终止 / 用户取消」等行请原样保留，别删。
+      placeholder: |-
+        [03:12:41][爬取] 开始爬取 30 个仓库…
+        [03:12:43][可用性] 可用性检测 93 个音源（jsenv 沙箱）…
+        [03:12:45][调试] 步骤 → 可用性检测 32/93 xxx音源 · 沙箱检测
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充说明 / 截图
+      description: 其它线索，或者直接把截图拖进这个框。也可以写你试过哪些办法、分别是什么结果。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已检查上面的日志与截图，其中**不含 GitHub Token、代理账号密码等敏感信息**
+          required: true
