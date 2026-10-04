@@ -1,5 +1,5 @@
 name: 问题反馈
-description: 卡住 / 报错 / 灌入失败 / 界面异常等，按这项表填能最快定位
+description: 卡住 / 报错 / 灌入失败 / 界面异常等，按这个表填能最快定位
 title: "[反馈] "
 body:
   - type: markdown
