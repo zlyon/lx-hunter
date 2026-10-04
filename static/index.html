@@ -69,6 +69,9 @@
   button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
   button.danger { background: var(--red); color: var(--md-surface, #fff); }
   button.ghost.danger { background: transparent; color: var(--red); border-color: var(--red); }
+  /* 外链按钮：外观与 button.ghost 一致，用于跳转到 GitHub 的链接 */
+  a.ghost { display: inline-flex; align-items: center; gap: 4px; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 8px 18px; font-size: 13px; text-decoration: none; cursor: pointer; }
+  a.ghost:hover { color: var(--accent); border-color: var(--accent); }
   button.ok { background: var(--green); color: var(--md-surface, #fff); }
   button.small { padding: 3px 12px; font-size: 12px; }
   .btns { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
@@ -173,7 +176,7 @@
       <button class="nav-item" data-view="settings"><span class="ico">⚙️</span>设置</button>
     </nav>
     <div class="side-foot">
-      <div class="foot-line">v1.4.20 · 作者 zlyon</div>
+      <div class="foot-line">v1.4.21 · 作者 zlyon</div>
       <a class="foot-about" href="https://github.com/zlyon/lx-hunter" target="_blank" rel="noopener">ℹ️ 关于 · GitHub 仓库</a>
     </div>
   </aside>
@@ -358,8 +361,24 @@
           <span class="hint">每测完一批自动继续下一批，直到全部测完；此数值仅为分批展示粒度</span>
         </div>
         <div class="form-row">
+          <label>极速模式</label>
+          <label class="chk"><input type="checkbox" id="cfgFastMode"> 进一步缩短超时</label>
+        </div>
+        <div class="form-row">
+          <span class="hint" style="width:auto">任务经常意外终止时可开启：会压缩所有网络超时、尽快跑完一轮。代价是响应偏慢但质量尚可的音源可能被判为不可用；关闭极速模式后重新执行「可用性检测」即可重新评定</span>
+        </div>
+        <div class="form-row">
           <label>调试模式</label>
           <label class="chk"><input type="checkbox" id="cfgDebug"> 输出详细日志</label>
+          <button id="btnExportCfg" class="ghost" type="button">导出配置</button>
+          <a id="btnFeedback" class="ghost" href="https://github.com/zlyon/lx-hunter/issues/new?template=bug_report.yml" target="_blank" rel="noopener">提交反馈 ↗</a>
+        </div>
+        <div class="form-row" id="rowExportCfg" style="display:none">
+          <label>手动复制</label>
+          <div style="flex:1;min-width:220px">
+            <span class="hint">未能自动复制，内容已为你全选 —— 按 Ctrl+C 即可：</span>
+            <textarea id="exportCfgText" readonly style="width:100%;height:130px;margin-top:6px;font:12px/1.6 Consolas,monospace"></textarea>
+          </div>
         </div>
         <div class="btns"><button id="btnSaveCfg">保存设置</button></div>
       </div>
@@ -384,6 +403,6 @@
 
 <!-- 静态资源必须走 static/ 子路径（宿主公开路由 /api/v1/jsplugin/<id>/static/*，免鉴权）；
      写成 app.js 会被解析到插件根路由 → 要求 JWT → 401 -->
-<script src="static/app.js?v=1.4.20"></script>
+<script src="static/app.js?v=1.4.21"></script>
 </body>
 </html>

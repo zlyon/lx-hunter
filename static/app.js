@@ -107,7 +107,7 @@ for (var ti = 0; ti < navBtns.length; ti++) {
     for (var k = 0; k < views.length; k++) views[k].classList.remove('active')
     $('pane-' + this.getAttribute('data-view')).classList.add('active')
     if (this.getAttribute('data-view') === 'import') refreshImportTab()
-    if (this.getAttribute('data-view') === 'settings') refreshSettings()
+    if (this.getAttribute('data-view') === 'settings') { refreshSettings(); prefetchExportCfg() }
     closeDrawer() // 移动端：选完页面自动收起抽屉
   }
 }
@@ -610,6 +610,7 @@ function refreshSettings() {
     $('cfgDeep').checked = !!c.deepCheck
     $('cfgMaxDeep').value = c.maxDeepCheck || 60
     $('cfgDebug').checked = !!c.debugMode
+    $('cfgFastMode').checked = !!c.fastMode
     $('ghTokenState').textContent = c.ghTokenSet ? '已配置 ✓' : '未配置（未认证限额 60 次/小时）'
     renderRepos(c.customRepos || [])
   })
@@ -643,7 +644,7 @@ function renderRepos(custom) {
       var repo = this.getAttribute('data-repo')
       if (!confirm('删除自定义仓库 ' + repo + '？（已收录的链接不受影响）')) return
       return api('/repos/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) })
-        .then(function () { refreshSettings() })
+        .then(function () { invalidateExportCfg(); refreshSettings() })
     })
   }
 }
@@ -655,14 +656,140 @@ onClick('btnSaveCfg', function () {
     useJsdelivr: $chk('cfgUseJsdelivr'),
     deepCheck: $chk('cfgDeep'),
     maxDeepCheck: parseInt($val('cfgMaxDeep', '60'), 10) || 60,
-    debugMode: $chk('cfgDebug')
+    debugMode: $chk('cfgDebug'),
+    fastMode: $chk('cfgFastMode')
   }
   var tk = $val('cfgGhToken', '').trim()
   if (tk) body.ghToken = tk // 留空 = 保持原 Token 不变
   return api('/config', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
-  }).then(function () { $('cfgGhToken').value = ''; return refreshSettings() }).then(function () { alert('设置已保存') })
+  }).then(function () { $('cfgGhToken').value = ''; invalidateExportCfg(); return refreshSettings() }).then(function () { alert('设置已保存') })
+})
+
+/* ===== 「导出配置」：一键把环境 + 设置复制到剪贴板，用户直接粘贴到反馈 issue =====
+   脱敏在后端做（代理密码 / GitHub Token / 宿主真实域名都不会出现在这里）；
+   前端只负责补「浏览器侧才能拿到」的客户端信息。 */
+function pluginVersion() {
+  try {
+    var s = document.querySelector('script[src*="app.js?v="]')
+    if (s) {
+      var m = String(s.getAttribute('src')).match(/[?&]v=([0-9.]+)/)
+      if (m) return m[1]
+    }
+  } catch (e) {}
+  try {
+    var f = document.querySelector('.foot-line')
+    if (f) {
+      var m2 = String(f.textContent).match(/v([0-9.]+)/)
+      if (m2) return m2[1]
+    }
+  } catch (e) {}
+  return ''
+}
+function timeZoneName() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch (e) { return '' }
+}
+/* 写剪贴板：必须在「点击手势」内调用 —— 浏览器只放行手势有效期内（数秒）的剪贴板写入，
+   超时后一律拒绝（这正是「点了复制却被浏览器拒绝」的成因）。
+   先试 execCommand（同步、不依赖 Permissions Policy），失败再退到 Clipboard API。 */
+function copyNow(txt) {
+  if (legacyCopy(txt)) return Promise.resolve(true)
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(txt).then(function () { return true }, function () { return false })
+  }
+  return Promise.resolve(false)
+}
+function legacyCopy(txt) {
+  try {
+    try { window.focus() } catch (e0) {} // 内嵌页面里文档没聚焦时 execCommand 会直接返回 false
+    var ta = document.createElement('textarea')
+    ta.value = txt
+    ta.setAttribute('readonly', '')
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    if (ta.setSelectionRange) ta.setSelectionRange(0, txt.length)
+    var ok = document.execCommand ? document.execCommand('copy') : false
+    document.body.removeChild(ta)
+    return !!ok
+  } catch (e) { return false }
+}
+/* 「导出配置」文本预取缓存。
+   导出要等后端探测洛雪网关（单次最慢 5s，冷启动还会重试一次），而手势窗口只有几秒
+   —— 边点边等就会让复制被浏览器拒掉。所以进设置页 / 页面加载后先静默预取，
+   点击时直接从缓存里同步复制，再后台刷新缓存供下次用。 */
+var exportCfgCache = { text: '', at: 0, inflight: null }
+var EXPORT_CFG_TTL = 60000
+function exportCfgQuery() {
+  return '?ver=' + encodeURIComponent(pluginVersion()) +
+    '&ua=' + encodeURIComponent(navigator.userAgent || '') +
+    '&screen=' + encodeURIComponent((typeof screen !== 'undefined' && screen.width) ? (screen.width + 'x' + screen.height) : '') +
+    '&lang=' + encodeURIComponent(navigator.language || '') +
+    '&tz=' + encodeURIComponent(timeZoneName()) +
+    '&touch=' + ((('ontouchstart' in window) || (navigator.maxTouchPoints > 0)) ? '1' : '0')
+}
+function cacheFresh() { return !!exportCfgCache.text && (Date.now() - exportCfgCache.at < EXPORT_CFG_TTL) }
+function invalidateExportCfg() { exportCfgCache.at = 0 }
+function fetchExportCfg() {
+  if (exportCfgCache.inflight) return exportCfgCache.inflight
+  var p = api('/export-config' + exportCfgQuery()).then(function (r) {
+    exportCfgCache.text = r.text || ''
+    // 文本里带「探测中」= 洛雪状态还没探到：不写长 TTL，下次点击重新取
+    // （导出本身是毫秒级，重取不会拖出手势窗口）
+    exportCfgCache.at = (exportCfgCache.text.indexOf('探测中') === -1) ? Date.now() : 0
+    exportCfgCache.inflight = null
+    return exportCfgCache.text
+  })
+  exportCfgCache.inflight = p
+  p.then(null, function () { exportCfgCache.inflight = null })
+  return p
+}
+function prefetchExportCfg() {
+  if (cacheFresh() || exportCfgCache.inflight) return
+  fetchExportCfg().then(null, function () {}) // 后台静默：失败不打扰用户，点击时会重新请求
+}
+onClick('btnExportCfg', function () {
+  var btn = $('btnExportCfg')
+  var row = $('rowExportCfg')
+  var ta = $('exportCfgText')
+  if (!btn || !ta) return Promise.resolve()
+  var old = btn.textContent
+  function restore() { btn.disabled = false; btn.textContent = old }
+  function done() {
+    if (row) row.style.display = 'none'
+    btn.disabled = false
+    btn.textContent = '已复制 ✓'
+    setTimeout(restore, 1800)
+  }
+  /* 自动复制被浏览器拒绝 → 退化为手动复制：内容预置 + 全选，用户按 Ctrl+C 即可 */
+  function manual(txt) {
+    ta.value = txt
+    if (row) row.style.display = ''
+    ta.focus()
+    ta.select()
+    if (ta.setSelectionRange) ta.setSelectionRange(0, txt.length)
+    btn.disabled = false
+    btn.textContent = '请按 Ctrl+C'
+    setTimeout(restore, 3000)
+  }
+  btn.disabled = true
+  btn.textContent = '复制中…'
+  if (cacheFresh()) {
+    // 缓存命中：复制全程都在本次点击的手势内完成，成功率最高
+    var cached = exportCfgCache.text
+    invalidateExportCfg()
+    prefetchExportCfg() // 后台刷新，下次点击拿到最新数据
+    return copyNow(cached).then(function (ok) { if (ok) done(); else manual(cached) })
+  }
+  // 无缓存（页面刚打开就点）：只能等请求回来再复制，可能已出手势窗口 → 失败则退化为手动复制
+  return fetchExportCfg().then(function (txt) {
+    return copyNow(txt).then(function (ok) { if (ok) done(); else manual(txt) })
+  }).catch(function (e) {
+    restore()
+    alert('导出失败：' + (e && e.message ? e.message : e))
+  })
 })
 onClick('btnAddRepo', function () {
   var raw = $('inpRepo').value.trim()
@@ -677,7 +804,7 @@ onClick('btnAddRepo', function () {
     if (lastCustom[j].toLowerCase() === repo.toLowerCase()) { alert('「' + repo + '」已添加过，无需重复添加'); return }
   }
   return api('/repos/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) })
-    .then(function () { $('inpRepo').value = ''; refreshSettings() })
+    .then(function () { $('inpRepo').value = ''; invalidateExportCfg(); refreshSettings() })
     .catch(function (e) {
       var msg = e.message || String(e)
       if (/内置/.test(msg)) alert('「' + repo + '」已在内置仓库中，无需添加')
@@ -730,3 +857,5 @@ refreshStats().then(refreshSources).catch(function (e) {
 api('/import-status').then(function (st) { if (st.running) watchImport(); else releaseImportUI() }).catch(function () { releaseImportUI() })
 setInterval(pollJob, 1500)
 pollJob()
+/* 页面加载后静默预取一次「导出配置」文本：既让点击复制走手势内路径，也顺带预热洛雪网关 */
+setTimeout(prefetchExportCfg, 1500)

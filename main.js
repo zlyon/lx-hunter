@@ -167,13 +167,57 @@ var job = { running: false, type: '', cancelRequested: false, progress: {}, step
 var logBuf = []
 var logSeq = 0
 
+// ==================== 敏感信息脱敏 ====================
+// 日志与「导出配置」共用同一套规则：脱敏由插件做，用户不需要手动删任何东西。
+// 目的：用户把日志原样贴到公开 issue 也不会泄露凭据。
+// 覆盖：GitHub Token（ghp_/gho_/…）、URL 内嵌账号密码、常见 token 查询参数、JWT。
+function maskSensitive(s) {
+  var t = String(s == null ? '' : s)
+  // GitHub Token：保留前缀，便于分辨是 classic / OAuth / fine-grained
+  t = t.replace(/\b(gh[porsu])_[A-Za-z0-9]{16,}/g, '$1_**')
+  t = t.replace(/\bgithub_pat_[A-Za-z0-9_]{16,}/g, 'github_pat_**')
+  // URL 内嵌凭据：scheme://user:pass@host / scheme://user@host → 保留主机与端口
+  t = t.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@"']{1,200}@/gi, '$1**:**@')
+  // 查询参数里的 token / 密码
+  t = t.replace(/([?&](?:access_token|refresh_token|token|password|passwd|pwd|secret|sign|apikey|api_key|auth)=)[^&\s"']+/gi, '$1**')
+  // JWT（宿主 access_token 就是这种三段式形态）
+  t = t.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, 'eyJ**.eyJ**.JWT')
+  return t
+}
+
+// 代理地址脱敏：与宿主地址同一套思路——只保留「形态」（协议 + 主机类型 + 端口）。
+// 自建代理的域名 / IP 也是隐私，一律不外发；端口保留，便于判断用的是哪类代理软件。
+// 例：http://alice:pw@proxy.example.com:7897 → http://<域名>:7897
+function describeProxy(raw) {
+  try {
+    var s = String(raw == null ? '' : raw).trim()
+    if (!s) return '未配置'
+    var m = s.match(/^(socks5h|socks5|socks4a|socks4|https?):\/\//i)
+    var proto = m ? m[1].toLowerCase() : 'http'
+    var rest = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    rest = rest.replace(/^[^/@]*@/, '')            // 去掉「账号:密码@」
+    var slash = rest.indexOf('/')
+    var hp = slash >= 0 ? rest.slice(0, slash) : rest
+    var host = hp, port = ''
+    var colon = host.lastIndexOf(':')
+    if (colon > 0 && /^\d+$/.test(host.slice(colon + 1))) { port = host.slice(colon + 1); host = host.slice(0, colon) }
+    var kind
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) kind = 'IP'
+    else if (/^localhost$/i.test(host)) kind = 'localhost'
+    else if (host.indexOf('.') === -1) kind = '主机名'
+    else kind = '域名'
+    return proto + '://<' + kind + '>' + (port ? ':' + port : '')
+  } catch (e) { return '已配置' }
+}
+
 function log(msg, module, level) {
   logSeq++
-  logBuf.push({ seq: logSeq, ts: Date.now(), level: level || 'info', module: module || '系统', msg: String(msg) })
+  var safe = maskSensitive(msg)
+  logBuf.push({ seq: logSeq, ts: Date.now(), level: level || 'info', module: module || '系统', msg: safe })
   // 调试模式下调高上限：否则逐条/逐线路的明细会把出问题前的那几行挤掉，反而更难查
   if (logBuf.length > (debugOn() ? 2000 : 800)) logBuf.shift()
   var fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'
-  try { songloft.log[fn]('[' + (module || '系统') + '] ' + msg) } catch (e) {}
+  try { songloft.log[fn]('[' + (module || '系统') + '] ' + safe) } catch (e) {}
 }
 
 // 调试模式（设置页开关，默认关闭）：只在排查任务异常时开启，输出逐条 / 逐线路细节。
@@ -224,6 +268,20 @@ function parseBody(req) {
 
 function sleep(ms) { return new Promise(function (res) { setTimeout(res, ms) }) }
 
+// ==================== 单步超时（含「极速模式」） ====================
+// 常规单步超时 5s。部分宿主对任务总时长限制较严，整轮爬取 / 可用性检测会被强制中断，
+// 于是提供「极速模式」：把所有 ≤5s 的单步超时统一压到 2.5s，尽可能缩短整轮耗时。
+// 代价：响应偏慢但质量尚可的音源会被直接判为不可用（关闭极速模式后重跑可用性检测即可重新评定）。
+// 长超时（洛雪网关灌入 30s）属外部依赖，capTmo 只压 <= T_STEP 的值，故不受极速模式影响。
+var T_STEP = 5000
+var T_FAST = 2500
+function capTmo(ms) {
+  ms = (typeof ms === 'number' && ms > 0) ? ms : T_STEP
+  if (config && config.fastMode && ms <= T_STEP) return T_FAST
+  return ms
+}
+function fmtSec(ms) { var s = ms / 1000; return (s % 1 === 0) ? String(s) : s.toFixed(1) }
+
 function fetchWithTimeout(url, options, timeoutMs) {
   options = options || {}
   // QuickJS 宿主 fetch 不一定支持 AbortSignal，超时兜底用 race。
@@ -231,7 +289,7 @@ function fetchWithTimeout(url, options, timeoutMs) {
   // 会被宿主当作插件异常导致 VM 重载（onDeinit → 任务静默停止）。
   var timerId
   var timer = new Promise(function (_, rej) {
-    timerId = setTimeout(function () { rej(new Error('请求超时 ' + url.slice(0, 80))) }, timeoutMs || 5000)
+    timerId = setTimeout(function () { rej(new Error('请求超时 ' + url.slice(0, 80))) }, capTmo(timeoutMs))
   })
   timer.catch(function () {}) // 吸收败者 rejection
   return Promise.race([
@@ -246,8 +304,9 @@ function fetchWithTimeout(url, options, timeoutMs) {
 // 硬超时包装：给任意 Promise（jsenv 创建/销毁等无超时参数的调用）兜底，
 // 防止单个步骤永久挂起导致取消请求无法生效
 function withTimeout(p, ms, label) {
+  ms = capTmo(ms)
   var timer = new Promise(function (_, rej) {
-    setTimeout(function () { rej(new Error((label || '操作') + ' 超时(' + Math.round(ms / 1000) + 's)')) }, ms)
+    setTimeout(function () { rej(new Error((label || '操作') + ' 超时(' + fmtSec(ms) + 's)')) }, ms)
   })
   timer.catch(function () {}) // 败者吸收，避免 unhandled rejection
   return Promise.race([Promise.resolve(p), timer])
@@ -259,7 +318,7 @@ function withTimeout(p, ms, label) {
 function readBody(res, as, timeoutMs, label) {
   var p
   try { p = res[as]() } catch (e) { return Promise.reject(e) }
-  return withTimeout(p, timeoutMs || 5000, label || '读取响应体')
+  return withTimeout(p, capTmo(timeoutMs), label || '读取响应体')
 }
 
 // 把宿主/运行时的生硬错误翻译成人话。
@@ -393,14 +452,14 @@ function crawlFetch(url, options, timeoutMs) {
   function attempt() {
     if (i >= candidates.length) {
       var last = candidates[candidates.length - 1]
-      return doFetch(last, timeoutMs || 5000) // 全失败时抛最后候选的错误
+      return doFetch(last, capTmo(timeoutMs)) // 全失败时抛最后候选的错误
     }
     var c = candidates[i++]
-    var t = timeoutMs || 5000 // 所有线路统一超时（不再区分首/回退）
+    var t = capTmo(timeoutMs) // 所有线路统一超时（不再区分首/回退；极速模式下进一步压缩）
     var label = '线路 ' + i + '/' + candidates.length + ' ' + candKind(c)
     var t0 = Date.now()
     setLine(label)
-    dlog('请求 ' + label + ' ' + shortUrl(c.url) + '（超时 ' + Math.round(t / 1000) + 's）')
+    dlog('请求 ' + label + ' ' + shortUrl(c.url) + '（超时 ' + fmtSec(t) + 's）')
     return doFetch(c, t).then(function (res) {
       dlog('返回 HTTP ' + res.status + ' · ' + (Date.now() - t0) + 'ms · ' + label)
       if (!res.ok && res.status >= 500 && i < candidates.length) return attempt() // 5xx 换下一候选
@@ -534,6 +593,7 @@ router.get('/api/config', function () {
     useJsdelivr: !!config.useJsdelivr,
     deepCheck: !!config.deepCheck,
     debugMode: !!config.debugMode,
+    fastMode: !!config.fastMode,
     maxDeepCheck: config.maxDeepCheck,
     builtinRepos: DEFAULT_REPOS,
     customRepos: config.customRepos || [],
@@ -548,6 +608,7 @@ router.post('/api/config', function (req) {
   if (typeof b.useJsdelivr === 'boolean') config.useJsdelivr = b.useJsdelivr
   if (typeof b.deepCheck === 'boolean') config.deepCheck = b.deepCheck
   if (typeof b.debugMode === 'boolean') config.debugMode = b.debugMode
+  if (typeof b.fastMode === 'boolean') config.fastMode = b.fastMode
   if (typeof b.maxDeepCheck === 'number') config.maxDeepCheck = Math.max(1, Math.min(500, b.maxDeepCheck))
   if (Array.isArray(b.reposOverride)) config.reposOverride = b.reposOverride.map(function (s) { return String(s).trim() }).filter(Boolean)
   if (typeof b.ghToken === 'string' && b.ghToken.trim()) {
@@ -555,9 +616,9 @@ router.post('/api/config', function (req) {
     log('GitHub Token 已保存（API 限额提升到 5000 次/小时）', '设置')
   }
   return songloft.storage.set(CFG_KEY, JSON.stringify(config)).then(function () {
-    var netDesc = config.forceProxy && config.proxy ? '强制代理 ' + config.proxy
+    var netDesc = config.forceProxy && config.proxy ? '强制代理 ' + describeProxy(config.proxy)
       : config.ghMirror ? '镜像 ' + config.ghMirror
-      : config.proxy ? '代理 ' + config.proxy
+      : config.proxy ? '代理 ' + describeProxy(config.proxy)
       : '直连'
     log('设置已保存（爬取链路：' + netDesc + '）', '设置')
     return jsonResp({ ok: true })
@@ -681,6 +742,131 @@ router.get('/api/export', function () {
   return jsonResp({ exportedAt: new Date().toISOString(), count: usable.length, sources: usable })
 })
 
+// ---------- 一键导出配置（自动脱敏，供提交 issue 用）----------
+// 设计意图：把「排查需要的信息」全部由插件自己收集好，用户只需「点一下 → 粘贴」。
+// 因此这里做三件事：① 环境与设置一次性打包；② 敏感项一律在本机脱敏（绝不外发原始凭据）；
+// ③ 「洛雪音源插件装没装」直接探测给出结论，不再让用户自己判断。
+// 宿主地址只保留「地址形态」（是否中继域名 / IP / 端口），真实域名与 IP 不外发。
+function describeHostAddr(raw) {
+  try {
+    var s = String(raw || '')
+    if (!s) return '未知'
+    var proto = /^https:/i.test(s) ? 'https' : 'http'
+    var rest = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    var slash = rest.indexOf('/')
+    var hp = slash >= 0 ? rest.slice(0, slash) : rest
+    var host = hp
+    var port = ''
+    var colon = host.lastIndexOf(':')
+    if (colon > 0 && /^\d+$/.test(host.slice(colon + 1))) { port = host.slice(colon + 1); host = host.slice(0, colon) }
+    var kind
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) kind = 'IP'
+    else if (/\.(?:5ddd\.com|fnos\.net)$/i.test(host)) kind = '飞牛中继域名(FN Connect)'
+    else if (/^localhost$/i.test(host)) kind = 'localhost'
+    else if (host.indexOf('.') === -1) kind = '主机名'
+    else kind = '域名'
+    return proto + '://<' + kind + '>' + (port ? ':' + port : '')
+  } catch (e) { return '未知' }
+}
+
+// 探测洛雪音源插件（lxmusic）状态：装没装、网关通不通，由插件自己判断，不让用户填
+/* 探测洛雪网关是否可用。
+   实测：宿主首次调用洛雪插件时要先把它的 VM 拉起来，耗时可能超过单次 5s —— 一次超时不等于洛雪不可用，
+   所以超时后隔 600ms 再试一次（只是把「冷启动」和「真的不通」区分开，单次超时标准不变）。 */
+function probeLxStatus(tries) {
+  tries = tries || 0
+  return lxApi('GET', '/api/sources', undefined, 5000).then(function (r) {
+    if (r.status === 404) return '未安装（网关 404）'
+    if (!r.ok) return '网关异常（HTTP ' + r.status + '）'
+    var d = unwrapResp(r)
+    var n = Array.isArray(d) ? d.length : (d && Array.isArray(d.list) ? d.list.length : -1)
+    return '已安装 · 可访问' + (n >= 0 ? '（现有音源 ' + n + ' 个）' : '') + (tries ? '（重试后恢复）' : '')
+  }).catch(function (e) {
+    var m = maskSensitive(String((e && e.message) || e || ''))
+    if (/超时|timeout/i.test(m)) {
+      if (tries < 1) return sleep(600).then(function () { return probeLxStatus(tries + 1) })
+      return '网关无响应（' + fmtSec(capTmo(T_STEP)) + 's 超时，已重试）'
+    }
+    return '探测失败（' + m.slice(0, 60) + '）'
+  })
+}
+
+/* 洛雪状态缓存 + 非阻塞取值。
+   为什么必须缓存：导出配置要同步等这个探测（冷启动实测 5.6s），而浏览器只放行「点击后几秒内」的
+   剪贴板写入 —— 导出慢了，复制就会错过手势窗口被拒（用户实测：首次点「导出配置」总是只能手动 Ctrl+C）。
+   所以：导出只读缓存（毫秒返回），探测放后台做，插件加载时先预热一次。 */
+var LX_STATUS_TTL = 120000
+var LX_STATUS_WAIT_MS = 1200 // 缓存未命中时给探测的极短预算：赶得上就用真值，赶不上也不拖慢导出
+var lxStatus = { desc: '', at: 0, inflight: null }
+function refreshLxStatus() {
+  if (lxStatus.inflight) return lxStatus.inflight
+  var p = probeLxStatus().then(function (d) {
+    lxStatus.desc = d
+    lxStatus.at = Date.now()
+    lxStatus.inflight = null
+    return d
+  })
+  lxStatus.inflight = p
+  p.then(null, function () { lxStatus.inflight = null })
+  return p
+}
+function lxStatusDesc() {
+  if (lxStatus.desc && Date.now() - lxStatus.at < LX_STATUS_TTL) {
+    refreshLxStatus() // 命中缓存也顺手后台刷新，保证值不过期（不阻塞）
+    return Promise.resolve(lxStatus.desc)
+  }
+  return withTimeout(refreshLxStatus(), LX_STATUS_WAIT_MS, '洛雪状态')
+    .catch(function () { return lxStatus.desc || '探测中（请再点一次「导出配置」）' })
+}
+
+router.get('/api/export-config', function (req) {
+  var q = parseQuery(req.query)
+  var hostP = (typeof songloft !== 'undefined' && songloft.plugin && typeof songloft.plugin.getHostUrl === 'function')
+    ? songloft.plugin.getHostUrl().then(describeHostAddr, function () { return '未知' })
+    : Promise.resolve('未知')
+  return hostP.then(function (hostDesc) {
+    return lxStatusDesc().then(function (lxDesc) {
+      var out = {
+        '插件': {
+          '名称': '音源猎手',
+          '版本': String(q.ver || '') || '未知',
+          '入口': 'lx-hunter'
+        },
+        '导出时间': new Date().toISOString(),
+        '客户端': {
+          'UA': String(q.ua || '').slice(0, 300),
+          '屏幕': String(q.screen || '').slice(0, 24),
+          '语言': String(q.lang || '').slice(0, 24),
+          '时区': String(q.tz || '').slice(0, 48),
+          '触屏': q.touch === '1'
+        },
+        '宿主': { '地址形态': hostDesc, '洛雪音源插件': lxDesc },
+        '网络设置': {
+          '代理': describeProxy(config.proxy),
+          '强制代理（代理优先）': !!config.forceProxy,
+          'raw 加速镜像': config.ghMirror || '不使用镜像',
+          'jsDelivr 加速': !!config.useJsdelivr,
+          '单步超时(秒)': capTmo(config.checkTimeoutMs) / 1000,
+          '极速模式': !!config.fastMode,
+          'GitHub Token': config.ghToken ? '已配置' : '未配置（未认证限额 60 次/小时）'
+        },
+        '检测设置': {
+          '爬取后自动执行 jsenv 可用性检测': !!config.deepCheck,
+          '每批数量': config.maxDeepCheck,
+          '调试模式': !!config.debugMode
+        },
+        '库': {
+          '已收录链接': Object.keys(db.sources).length,
+          '已灌入': Object.keys(imported).length,
+          '自定义仓库': config.customRepos || []
+        },
+        '任务': { '运行中': !!job.running, '类型': job.type || '' }
+      }
+      return jsonResp({ text: JSON.stringify(out, null, 2) })
+    })
+  })
+})
+
 // ---------- 灌入洛雪 / 撤回 ----------
 function lxGateway(path_) {
   return songloft.plugin.getHostUrl().then(function (hostUrl) {
@@ -690,7 +876,7 @@ function lxGateway(path_) {
   })
 }
 
-function lxApi(method, path_, bodyObj) {
+function lxApi(method, path_, bodyObj, timeoutMs) {
   return lxGateway(path_).then(function (gw) {
     var opts = {
       method: method,
@@ -699,8 +885,9 @@ function lxApi(method, path_, bodyObj) {
     if (bodyObj !== undefined) opts.body = JSON.stringify(bodyObj)
     // 灌入：由洛雪插件自己去下载脚本并导入，属外部依赖（下载耗时不可控），
     // 不套用爬取链路的 5s 超时，这里给足 30s
-    return fetchWithTimeout(gw.url, opts, 30000).then(function (res) {
-      return readBody(res, 'text', 30000, '读取洛雪响应').then(function (text) {
+    var ms = timeoutMs || 30000
+    return fetchWithTimeout(gw.url, opts, ms).then(function (res) {
+      return readBody(res, 'text', ms, '读取洛雪响应').then(function (text) {
         var data = null
         try { data = text ? JSON.parse(text) : null } catch (e) {}
         return { status: res.status, ok: res.status < 400, data: data, text: text }
@@ -920,13 +1107,13 @@ router.post('/api/import-cancel', function () {
   if (!importState.cancelRequested) {
     importState.cancelRequested = true
     log('正在取消灌入…（处理完当前音源即停止）', '灌入', 'warn')
-    // 兜底：取消后当前步骤最多再等 5 秒（与全局单步超时一致）即强制释放任务位
+    // 兜底：取消后当前步骤最多再等一个单步超时（常规 5s / 极速 2.5s）即强制释放任务位
     setTimeout(safeAsync('灌入取消兜底', function () {
       if (importState.running && importState.cancelRequested) {
         importState.running = false
         log('用户取消: 已强制结束', '灌入', 'warn')
       }
-    }), 5000)
+    }), capTmo(T_STEP))
   }
   return jsonResp({ cancelRequested: true })
 })
@@ -1214,7 +1401,7 @@ function startHeartbeat() {
   }), 60000)
 }
 
-// 取消后 5 秒当前步骤仍未让出（如沙箱调用挂死），强制释放任务位，保证取消必然生效
+// 取消后一个单步超时（常规 5s / 极速 2.5s）当前步骤仍未让出（如沙箱调用挂死），强制释放任务位，保证取消必然生效
 function armCancelReaper() {
   setTimeout(safeAsync('取消兜底', function () {
     if (job.running && job.cancelRequested) {
@@ -1224,7 +1411,7 @@ function armCancelReaper() {
       clearStep()
       saveDbSoon().catch(function () {})
     }
-  }), 5000)
+  }), capTmo(T_STEP))
 }
 function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null } }
 
@@ -1245,8 +1432,8 @@ function startJob(type, opts) {
   // 调试模式：把本次任务的关键参数记下来，便于对照日志排查（代理凭据做脱敏）
   dlog('任务启动 type=' + type + ' · 收录 ' + Object.keys(db.sources).length + ' 条' +
     ' · 镜像 ' + (config.ghMirror || '无') +
-    ' · 代理 ' + (config.proxy ? String(config.proxy).replace(/\/\/[^/@]*@/, '//***@') : '无') + (config.forceProxy ? '(强制优先)' : '') +
-    ' · 单步超时 ' + Math.round((config.checkTimeoutMs || 5000) / 1000) + 's' +
+    ' · 代理 ' + describeProxy(config.proxy) + (config.forceProxy ? '(强制优先)' : '') +
+    ' · 单步超时 ' + fmtSec(capTmo(config.checkTimeoutMs)) + 's' + (config.fastMode ? '(极速模式)' : '') +
     ' · 自动深度检测 ' + (config.deepCheck ? '开' : '关') + (opts && opts.manual ? ' · 手动触发' : ''))
   run.then(function () {
     job.running = false
@@ -1508,13 +1695,13 @@ function deepCheckViaJsenv(entry, code) {
   dlog('沙箱创建… ' + (entry.name || entry.id))
   return withTimeout(songloft.jsenv.create(envName, BOOTSTRAP), 5000, '创建沙箱').then(function () {
     dlog('沙箱就绪 ' + (Date.now() - tEnv) + 'ms · 注入 scriptInfo…')
-    return withTimeout(songloft.jsenv.execute(envName, infoCode, 5000), 5000, '注入 scriptInfo').then(function (r) {
+    return withTimeout(songloft.jsenv.execute(envName, infoCode, capTmo(T_STEP)), 5000, '注入 scriptInfo').then(function (r) {
       if (r && r.error) throw new Error('注入 scriptInfo 失败: ' + String(r.error).slice(0, 120))
     })
   }).then(function () {
     var tInit = Date.now()
     dlog('脚本初始化…（' + code.length + ' 字节）')
-    return withTimeout(songloft.jsenv.executeWait(envName, code, 5000, ['inited']), 5000, '脚本初始化').then(function (r) {
+    return withTimeout(songloft.jsenv.executeWait(envName, code, capTmo(T_STEP), ['inited']), 5000, '脚本初始化').then(function (r) {
       dlog('脚本初始化返回 ' + (Date.now() - tInit) + 'ms' + (r && r.error ? '（错误：' + String(r.error).slice(0, 80) + '）' : ''))
       if (r.error) { result.loadError = String(r.error).slice(0, 200); return cleanup().then(function () { return result }) }
       var initedEv = null
@@ -1558,7 +1745,7 @@ function testPlatforms(envName, result) {
       dlog('沙箱取链 ' + src + ' 试听「' + song.name + '」…')
       // 每一次失败都记一行调试日志：能看出是哪首歌、哪个平台拖慢或失败
       function fail(reason) { lastMsg = '「' + song.name + '」' + reason; dlog('试听 ' + src + '「' + song.name + '」失败：' + reason); return trySong(i + 1) }
-      return withTimeout(songloft.jsenv.executeWait(envName, code, 5000, ['dispatchResult', 'dispatchError']), 5000, '取链请求').then(function (r) {
+      return withTimeout(songloft.jsenv.executeWait(envName, code, capTmo(T_STEP), ['dispatchResult', 'dispatchError']), 5000, '取链请求').then(function (r) {
         if (r.error) return fail(String(r.error).slice(0, 80))
         var ev = null
         for (var j = 0; j < (r.events || []).length; j++) {
@@ -1774,23 +1961,38 @@ function ensureLoaded() {
 function initChain() {
   return songloft.storage.get(CFG_KEY).then(function (raw) {
     try { config = raw ? JSON.parse(raw) : null } catch (e) { config = null }
+    // storage 里只保留「用户可自定义」的设置（= 设置页 / /api/config 暴露的那些键）：
+    // proxy、ghMirror、forceProxy、useJsdelivr、deepCheck、maxDeepCheck、debugMode、fastMode、
+    // customRepos、reposOverride、ghToken。其余键一律由下面的 INTERNAL_DEFAULTS 负责。
     if (!config) {
       config = {
-        repos: DEFAULT_REPOS.slice(),
         deepCheck: true,
         maxDeepCheck: 60,
-        checkTimeoutMs: 5000,
-        maxCandidatesPerRepo: 300,
-        maxContentBytes: MAX_CONTENT_BYTES,
         forceProxy: false,
         useJsdelivr: false,
         debugMode: false,
+        fastMode: false,
         ghToken: ''
       }
     }
     if (!Array.isArray(config.repos) || !config.repos.length) config.repos = DEFAULT_REPOS.slice()
-    if (typeof config.checkTimeoutMs !== 'number') config.checkTimeoutMs = 5000
-    if (typeof config.maxCandidatesPerRepo !== 'number') config.maxCandidatesPerRepo = 300
+    // 【配置归属规则】内部参数（界面上没有、用户无从修改）每次加载一律按「当前版本默认值」重写。
+    // 反面教材：checkTimeoutMs 在 v1.4.17 的出厂默认是 15000，v1.4.20 改成 5000 后，
+    // 老用户的 storage 里仍是 15000 —— 它既不是用户设置的、又不会被覆盖，于是「全局 5s」和
+    // 极速模式对它全部失效（爬取/读脚本实际仍是 15s）。内部值就该跟着版本走，不能留成化石。
+    var INTERNAL_DEFAULTS = {
+      checkTimeoutMs: 5000,
+      maxCandidatesPerRepo: 300,
+      maxContentBytes: MAX_CONTENT_BYTES
+    }
+    Object.keys(INTERNAL_DEFAULTS).forEach(function (k) {
+      if (config[k] !== INTERNAL_DEFAULTS[k]) {
+        if (config[k] !== undefined) {
+          log('内部参数按当前版本默认值重置：' + k + ' = ' + INTERNAL_DEFAULTS[k] + '（原 ' + config[k] + '）', '系统')
+        }
+        config[k] = INTERNAL_DEFAULTS[k]
+      }
+    })
     if (typeof config.forceProxy !== 'boolean') config.forceProxy = false
     if (typeof config.ghToken !== 'string') config.ghToken = ''
     return songloft.storage.get(DB_KEY)
@@ -1812,6 +2014,9 @@ function initChain() {
     }
     log('初始化完成：' + Object.keys(db.sources).length + ' 条已收录链接' +
       (Object.keys(imported).length ? '，' + Object.keys(imported).length + ' 条灌入记录' : ''), '系统')
+    // 预热洛雪状态缓存：把冷启动（宿主拉起 lxmusic 的 VM）在加载阶段一次性消化掉，
+    // 之后用户点「导出配置」直接命中缓存 → 导出恒为毫秒级 → 复制不会错过剪贴板手势窗口
+    refreshLxStatus()
   })
 }
 
