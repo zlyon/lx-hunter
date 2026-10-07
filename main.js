@@ -382,9 +382,19 @@ var MIRROR_PRESETS = [
   'https://ghfast.top',
   'https://gh1.lhl.one'
 ]
+// 镜像基址统一规范化：去空格 + 去尾部斜杠 + 缺协议补 https://
+// 「爬取（mirrorUrlFor）/ 保存配置 / 测试端点」三处共用同一规则，
+// 避免出现「测试能过、爬取静默失败」这类口径不一致（2026-10-05 修）。
+// 只在缺协议时才补，已写协议的不会被重复补成 https://https://…
+function normMirrorBase(s) {
+  var b = String(s == null ? '' : s).trim().replace(/\/+$/, '')
+  if (!b) return ''
+  if (!/^https?:\/\//i.test(b)) b = 'https://' + b
+  return b
+}
 // 自定义镜像无法预知流派，按主流的前缀式处理
 function mirrorUrlFor(mbase, rawUrl, rest) {
-  var base = String(mbase || '').trim().replace(/\/+$/, '')
+  var base = normMirrorBase(mbase)
   if (!base) return null
   return (MIRROR_STYLE[base] === 'path') ? (base + '/' + rest) : (base + '/' + rawUrl)
 }
@@ -603,7 +613,7 @@ router.get('/api/config', function () {
 router.post('/api/config', function (req) {
   var b = parseBody(req)
   if (typeof b.proxy === 'string') config.proxy = b.proxy.trim()
-  if (typeof b.ghMirror === 'string') config.ghMirror = b.ghMirror.trim()
+  if (typeof b.ghMirror === 'string') config.ghMirror = normMirrorBase(b.ghMirror)
   if (typeof b.forceProxy === 'boolean') config.forceProxy = b.forceProxy
   if (typeof b.useJsdelivr === 'boolean') config.useJsdelivr = b.useJsdelivr
   if (typeof b.deepCheck === 'boolean') config.deepCheck = b.deepCheck
@@ -641,10 +651,8 @@ var PROBE_TIMEOUT_MS = 8000
 
 router.post('/api/test-mirror', function (req) {
   var b = parseBody(req)
-  var mbase = String(b.mirror || '').trim()
+  var mbase = normMirrorBase(b.mirror)
   if (!mbase) return errResp(400, '缺少 mirror 参数')
-  if (!/^https?:\/\//i.test(mbase)) mbase = 'https://' + mbase
-  mbase = mbase.replace(/\/+$/, '')
   // 走与爬取完全相同的 mirrorUrlFor，保证「测试能通」=「爬取能用」，不会各写一套而跑偏
   var styleLabel = (MIRROR_STYLE[mbase] === 'path') ? '路径式' : '前缀式'
   var testUrl = mirrorUrlFor(mbase, PROBE_RAW, PROBE_REST)
