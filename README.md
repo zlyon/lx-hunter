@@ -2,7 +2,7 @@
 
 Songloft JS 插件：GitHub 音源爬取、沙箱可用性检测、多选灌入洛雪音源插件并支持一键撤回。需要先安装洛雪音乐插件。
 
-![版本](https://img.shields.io/badge/version-1.4.22-blue) ![许可](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
+![版本](https://img.shields.io/badge/version-1.4.23-blue)
 
 ![音源猎手界面](docs/screenshot-source-library.png)
 
@@ -97,6 +97,3 @@ GitHub API 未认证限额仅 **60 次/小时**，限额耗尽后本轮爬取会
 
 > ⚠️ 请不要手动把 GitHub Token 贴进来——它等同于账号凭据。
 
-## License
-
-GPL-3.0-or-later —— 任何人可自由使用、修改、分发本插件，但衍生作品必须同样以 GPL-3.0 开源，不得闭源换皮重发。详见 [LICENSE](LICENSE)。
